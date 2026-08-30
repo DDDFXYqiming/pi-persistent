@@ -30,7 +30,7 @@ shell 扫描是启发式的，防误不防恶；需要强隔离的 mission 放�
 
 ```bash
 # GitHub 安装（推荐）
-pi install git:github.com:DDDFXYqiming/pi-persistent
+pi install git:github.com/DDDFXYqiming/pi-persistent
 
 # Windows schannel / npm 拦截时改用本地路径
 git clone https://github.com/DDDFXYqiming/pi-persistent.git

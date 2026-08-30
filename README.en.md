@@ -30,7 +30,7 @@ The shell scanner is heuristic — it catches mistakes, not adversaries. Mission
 
 ```bash
 # from GitHub (recommended)
-pi install git:github.com:DDDFXYqiming/pi-persistent
+pi install git:github.com/DDDFXYqiming/pi-persistent
 
 # local fallback (Windows schannel / npm interception)
 git clone https://github.com/DDDFXYqiming/pi-persistent.git
