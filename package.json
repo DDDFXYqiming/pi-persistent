@@ -1,0 +1,29 @@
+{
+	"name": "pi-persistent",
+	"version": "0.1.0",
+	"description": "Resident autonomous mode for the Pi Coding Agent: /persistent <mission> keeps working and self-finding in-scope follow-ups until /sleep.",
+	"type": "module",
+	"license": "MIT",
+	"author": "DDDFXYqiming",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/DDDFXYqiming/pi-persistent.git"
+	},
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"pi",
+		"persistent",
+		"autonomous-agent",
+		"agent-loop"
+	],
+	"pi": {
+		"extensions": ["./index.ts"]
+	},
+	"dependencies": {
+		"typebox": "1.3.18"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	}
+}
