@@ -52,7 +52,7 @@ async function main() {
 	} catch { /* ignore */ }
 	await sleep(500);
 	const pass = loaded;
-	console.log(`\n[probe] ${pass ? "PASS" : "FAIL"} — pi-persistent via ~/.pi/agent/extensions auto-discovery`);
+	console.log(`\n[probe] ${pass ? "PASS" : "FAIL"} — pi-persistent loaded via installed package / extension discovery`);
 	if (!pass) {
 		console.log(`--- stderr tail ---\n${stderrAll.slice(-1500)}`);
 		console.log(`--- stdout tail ---\n${stdoutAll.slice(-1500)}`);
