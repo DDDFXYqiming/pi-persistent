@@ -4,7 +4,7 @@
 
 > 给 **Pi Coding Agent** 装上"常驻自主模式"：`/persistent <mission>` 之后 agent 跨 settled 边界无限续跑，任务做完自己找 in-scope 后续，直到你 `/sleep`。**无轮数熔断、工作区写边界、对用户零阻塞**。
 
-**对标 OpenAI Codex 未公测的 Persistent 模式**（"Continue working until put to sleep"，公开实现见 [codex-rs/core/assets/persistent_mode.md](https://github.com/openai/codex/blob/main/codex-rs/core/assets/persistent_mode.md)，WIRED 报道见[原文](https://www.wired.com/story/openai-is-developing-a-persistent-ai-agent/)），用 Pi 扩展 API 落地。续派与会话持久化机制参考 [@narumitw/pi-goal](https://github.com/narumiruna/pi-extensions)（MIT）的成熟实践，行为语义按 Persistent 重构：**不设 `automaticTurns` / `noProgressTurns` 熔断**——停止条件只有四个：mission 满足（证据级）、撞权限边界、需要用户输入、`/sleep`。
+续派与会话持久化机制参考 [@narumitw/pi-goal](https://github.com/narumiruna/pi-extensions)（MIT）的成熟实践。**不设 `automaticTurns` / `noProgressTurns` 熔断**——停止条件只有四个：mission 满足（证据级）、撞权限边界、需要用户输入、`/sleep`。
 
 ## 它在做什么
 

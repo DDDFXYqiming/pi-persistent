@@ -4,7 +4,7 @@
 
 > Resident autonomous mode for the **Pi Coding Agent**: after `/persistent <mission>` the agent keeps working across settled run boundaries and self-finds in-scope follow-ups until you `/sleep`. **No turn-limit breakers, workspace-confined writes, zero user-blocking.**
 
-**A Pi-native take on OpenAI's unreleased Codex "Persistent" mode** ("Continue working until put to sleep" — public implementation in [codex-rs/core/assets/persistent_mode.md](https://github.com/openai/codex/blob/main/codex-rs/core/assets/persistent_mode.md), coverage by [WIRED](https://www.wired.com/story/openai-is-developing-a-persistent-ai-agent/)). Continuation and persistence mechanics follow the proven patterns of [@narumitw/pi-goal](https://github.com/narumiruna/pi-extensions) (MIT); the behavior semantics are rebuilt for Persistent: **no `automaticTurns` / `noProgressTurns` circuit breakers** — the only stop conditions are: mission satisfied (evidence-based), a permission boundary, required user input, or `/sleep`.
+Continuation and persistence mechanics follow the proven patterns of [@narumitw/pi-goal](https://github.com/narumiruna/pi-extensions) (MIT). **No `automaticTurns` / `noProgressTurns` circuit breakers** — the only stop conditions are: mission satisfied (evidence-based), a permission boundary, required user input, or `/sleep`.
 
 ## What it does
 
