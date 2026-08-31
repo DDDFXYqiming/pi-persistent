@@ -26,6 +26,15 @@ export interface PersistentState {
 	updatedAt: number;
 	/** Automatic continuations dispatched so far. Informational, never a limit. */
 	iteration: number;
+	/**
+	 * Epoch ms until which the host must not dispatch. Set by persistent_wait: the
+	 * mission stays `active`, the loop just sleeps until then and wakes itself.
+	 */
+	wakeAt?: number;
+	/** Requested wait duration in ms, so the wake prompt can report real elapsed time. */
+	wakeMs?: number;
+	/** What the agent asked to re-check on wake, surfaced in the wake prompt. */
+	wakeNote?: string;
 	checkpoint?: PersistentCheckpoint;
 	reason?: string;
 }
@@ -95,6 +104,9 @@ export function normalizeState(raw: unknown): PersistentState | undefined {
 		startedAt: value.startedAt,
 		updatedAt: value.updatedAt,
 		iteration: Number.isSafeInteger(value.iteration) && value.iteration >= 0 ? value.iteration : 0,
+		wakeAt: typeof value.wakeAt === "number" && value.wakeAt > 0 ? value.wakeAt : undefined,
+		wakeMs: typeof value.wakeMs === "number" && value.wakeMs > 0 ? value.wakeMs : undefined,
+		wakeNote: typeof value.wakeNote === "string" ? value.wakeNote : undefined,
 		checkpoint,
 		reason: typeof value.reason === "string" ? value.reason : undefined,
 	};
@@ -112,8 +124,12 @@ export function loadState(ctx: SessionContextLike): PersistentState | undefined 
 export function statusLabel(state: PersistentState | undefined): string {
 	if (!state) return "off (never started)";
 	switch (state.status) {
-		case "active":
-			return `active · auto ${state.iteration}`;
+		case "active": {
+			const waiting = state.wakeAt && state.wakeAt > Date.now();
+			return waiting
+				? `active · waiting ${Math.max(1, Math.round((state.wakeMs ?? 1000) / 1000))}s · auto ${state.iteration}`
+				: `active · auto ${state.iteration}`;
+		}
 		case "dormant":
 			return `dormant · auto ${state.iteration}${state.reason ? ` · ${truncate(state.reason, 80)}` : ""}`;
 		case "off":

@@ -14,7 +14,8 @@ const WS = path.join(ROOT, "workspace");
 const OUT = path.join(ROOT, "outside");
 const SESS = path.join(tmpdir(), "pi-persistent-qwen-flow-sessions");
 const EXT = path.join(PKG, "index.ts");
-const MODEL = process.env.PI_E2E_MODEL ?? "qwen-local/qwen3.8-27b";
+const MODEL = process.env.PI_E2E_MODEL ?? "minimax/MiniMax-M3";
+const THINKING = process.env.PI_E2E_THINKING ?? "high";
 const TIMEOUT = 180_000;
 
 rmSync(ROOT, { recursive: true, force: true });
@@ -74,7 +75,8 @@ function lastState() {
 
 const child = spawn("pi", [
   "--mode", "rpc", "--offline", "--no-extensions",
-  "--model", MODEL, "--session-dir", SESS, "-e", EXT,
+  "--model", MODEL,
+		"--thinking", THINKING, "--session-dir", SESS, "-e", EXT,
 ], { cwd: WS, shell: true, stdio: ["pipe", "pipe", "pipe"] });
 
 child.stdout.setEncoding("utf8");

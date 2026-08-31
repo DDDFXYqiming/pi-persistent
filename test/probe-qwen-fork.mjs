@@ -11,7 +11,8 @@ const WS_A = path.join(ROOT, "proj-a");
 const WS_B = path.join(ROOT, "proj-b");
 const SESS = path.join(tmpdir(), "pi-persistent-qwen-fork-sessions");
 const EXT = path.join(PKG, "index.ts");
-const MODEL = process.env.PI_E2E_MODEL ?? "qwen-local/qwen3.8-27b";
+const MODEL = process.env.PI_E2E_MODEL ?? "minimax/MiniMax-M3";
+const THINKING = process.env.PI_E2E_THINKING ?? "high";
 
 rmSync(ROOT, { recursive: true, force: true });
 rmSync(SESS, { recursive: true, force: true });
@@ -54,6 +55,7 @@ async function main() {
   // Phase 1: start an active mission in project A, then kill the process.
   const first = spawn("pi", [
     "--mode", "rpc", "--offline", "--no-extensions", "--model", MODEL,
+		"--thinking", THINKING,
     "--session-dir", SESS, "-e", EXT,
   ], { cwd: WS_A, shell: true, stdio: ["pipe", "pipe", "pipe"] });
   let buffer = "";
@@ -85,6 +87,7 @@ async function main() {
   // Phase 2: fork that session into project B. The extension must disable the mission.
   const second = spawn("pi", [
     "--mode", "rpc", "--offline", "--no-extensions", "--model", MODEL,
+		"--thinking", THINKING,
     "--session-dir", SESS, "--fork", sourceFile, "-e", EXT,
   ], { cwd: WS_B, shell: true, stdio: ["pipe", "pipe", "pipe"] });
   let sawDisabledNotice = false;

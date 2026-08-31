@@ -10,7 +10,8 @@ const ROOT = path.join(PKG, ".tmp", "qwen-restore");
 const WS = path.join(ROOT, "workspace");
 const SESS = path.join(tmpdir(), "pi-persistent-qwen-restore-sessions");
 const EXT = path.join(PKG, "index.ts");
-const MODEL = process.env.PI_E2E_MODEL ?? "qwen-local/qwen3.8-27b";
+const MODEL = process.env.PI_E2E_MODEL ?? "minimax/MiniMax-M3";
+const THINKING = process.env.PI_E2E_THINKING ?? "high";
 const BEFORE = path.join(WS, "restore-before.txt");
 const AFTER = path.join(WS, "restore-after.txt");
 
@@ -38,7 +39,7 @@ function lastState(file) {
   return state;
 }
 function exact(file, expected) {
-  try { return readFileSync(file, "utf8") === expected; } catch { return false; }
+  try { return readFileSync(file, "utf8").trim() === expected; } catch { return false; }
 }
 async function waitUntil(predicate, timeout, label) {
   const deadline = Date.now() + timeout;
@@ -52,6 +53,7 @@ async function waitUntil(predicate, timeout, label) {
 function startPi(extra = []) {
   const child = spawn("pi", [
     "--mode", "rpc", "--offline", "--no-extensions", "--model", MODEL,
+		"--thinking", THINKING,
     "--session-dir", SESS, ...extra, "-e", EXT,
   ], { cwd: WS, shell: true, stdio: ["pipe", "pipe", "pipe"] });
   let buffer = "";

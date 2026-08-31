@@ -26,9 +26,11 @@ import {
 import {
 	buildContinuationPrompt,
 	buildKickoffPrompt,
+	buildWakePrompt,
 	CHECKPOINT_TOOL_DESCRIPTION,
 	ownedPromptStateId,
 	DORMANT_TOOL_DESCRIPTION,
+	WAIT_TOOL_DESCRIPTION,
 } from "./prompts.ts";
 import {
 	loadState,
@@ -67,10 +69,15 @@ export default function (pi: ExtensionAPI) {
 	let consecutiveErrors = 0;
 	let lastRunAborted = false;
 	let hardStopMessage: string | undefined;
+	/** Consecutive provider hard stops (quota/auth). One is not enough to stop. */
+	let hardStopStreak = 0;
 	let backoffTimer: ReturnType<typeof setTimeout> | undefined;
 	let deferredDispatchTimer: ReturnType<typeof setTimeout> | undefined;
 	let dispatchSeq = 0;
 	let awaitingStart: AwaitingStart | undefined;
+	let wakeTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Latest callback context, kept so timers can refresh the status line. */
+	let lastCtx: ExtensionContext | undefined;
 	let nextRunStateId: string | undefined;
 	let currentRunStateId: string | undefined;
 	let currentRunHadOutcome = false;
@@ -91,6 +98,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function clearTimers() {
+		if (wakeTimer) {
+			clearTimeout(wakeTimer);
+			wakeTimer = undefined;
+		}
 		if (backoffTimer) {
 			clearTimeout(backoffTimer);
 			backoffTimer = undefined;
@@ -106,12 +117,23 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function updateStatus(ctx: ExtensionContext | undefined) {
-		if (!ctx?.ui?.setStatus) return;
+		// A ctx captured before a session replacement/reload is invalidated by pi and
+		// throws on ANY property access, so the whole body is guarded.
 		try {
+			if (!ctx?.ui?.setStatus) return;
 			if (!state || state.status === "off") {
 				ctx.ui.setStatus(STATUS_KEY, undefined);
 			} else if (state.status === "active") {
-				ctx.ui.setStatus(STATUS_KEY, `♾ active · auto ${state.iteration}`);
+				// Show the requested wait length, not a countdown: nothing refreshes
+				// the status line while the loop is asleep.
+				const waiting = state.wakeAt && state.wakeAt > Date.now();
+				const secs = waiting ? Math.max(1, Math.round((state.wakeMs ?? 1000) / 1000)) : 0;
+				ctx.ui.setStatus(
+					STATUS_KEY,
+					waiting
+						? `♾ ⏳ waiting ${secs}s · auto ${state.iteration}`
+						: `♾ active · auto ${state.iteration}`,
+				);
 			} else {
 				ctx.ui.setStatus(
 					STATUS_KEY,
@@ -119,13 +141,25 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 		} catch {
-			/* status UI is best-effort in every mode */
+			/* status UI is best-effort, and a stale ctx must never break the loop */
+		}
+	}
+
+	/** Whether it is safe to dispatch now. A dead ctx counts as idle (dispatch retries). */
+	function safeCanDispatch(ctx: ExtensionContext | undefined): boolean {
+		try {
+			return ctx?.isIdle?.() === true && !ctx?.hasPendingMessages?.();
+		} catch {
+			return true;
 		}
 	}
 
 	function goDormant(ctx: ExtensionContext | undefined, reason: string) {
 		if (!state || state.status !== "active") return;
 		state.status = "dormant";
+		state.wakeAt = undefined;
+		state.wakeMs = undefined;
+		state.wakeNote = undefined;
 		state.reason = truncate(reason, 1000);
 		state.updatedAt = Date.now();
 		persist();
@@ -152,6 +186,9 @@ export default function (pi: ExtensionAPI) {
 		generation++;
 		clearTimers();
 		state.status = "off";
+		state.wakeAt = undefined;
+		state.wakeMs = undefined;
+		state.wakeNote = undefined;
 		state.reason = truncate(reason, 1000);
 		state.updatedAt = Date.now();
 		persist();
@@ -202,15 +239,55 @@ export default function (pi: ExtensionAPI) {
 		deliverOwnedPrompt(intent, deliverAs);
 	}
 
-	function dispatchContinuation() {
+	function dispatchContinuation(kind: "auto" | "wake" = "auto") {
 		if (!state || state.status !== "active" || awaitingStart) return;
+		// Real wall-clock slept time: from when the wait was armed, not from wakeAt
+		// (Date.now() - wakeAt is only the lateness of the timer).
+		const armedAt = state?.wakeAt && state.wakeMs ? state.wakeAt - state.wakeMs : undefined;
+		const waitedMs = kind === "wake" && armedAt ? Math.max(0, Date.now() - armedAt) : 0;
+		const wakeNote = kind === "wake" ? state.wakeNote : undefined;
 		state.iteration++;
+		state.wakeAt = undefined;
+		state.wakeMs = undefined;
+		state.wakeNote = undefined;
 		state.updatedAt = Date.now();
 		persist();
-		beginOwnedDelivery(buildContinuationPrompt(state, state.iteration), state.id, "followUp");
+		const prompt =
+			kind === "wake"
+				? buildWakePrompt(state, state.iteration, waitedMs, wakeNote)
+				: buildContinuationPrompt(state, state.iteration);
+		beginOwnedDelivery(prompt, state.id, "followUp");
 	}
 
-	function deferScheduleDispatch(ctx: ExtensionContext, delay = 0) {
+	/**
+	 * Sleep, then self-wake. persistent_wait uses this instead of dormant so the
+	 * mission stays active and the loop restarts itself with no user input.
+	 */
+	function scheduleWake(delayMs: number, note?: string) {
+		if (!state || state.status !== "active") return;
+		if (wakeTimer) clearTimeout(wakeTimer);
+		if (deferredDispatchTimer) {
+			clearTimeout(deferredDispatchTimer);
+			deferredDispatchTimer = undefined;
+		}
+		state.wakeAt = Date.now() + delayMs;
+		state.wakeMs = delayMs;
+		state.wakeNote = note ? truncate(note, 400) : undefined;
+		state.updatedAt = Date.now();
+		persist();
+		updateStatus(lastCtx);
+		const gen = generation;
+		const stateId = state.id;
+		wakeTimer = setTimeout(() => {
+			wakeTimer = undefined;
+			if (gen !== generation || state?.status !== "active" || state.id !== stateId) return;
+			log(`persistent_wait elapsed (asked ${Math.round(delayMs / 1000)}s); waking the mission`);
+			// No ctx access here: pi queues a followUp safely even if a run is active.
+			dispatchContinuation("wake");
+		}, delayMs);
+	}
+
+	function deferScheduleDispatch(ctx: ExtensionContext, delay = 0, kind: "auto" | "wake" = "auto") {
 		if (!state || state.status !== "active") return;
 		if (deferredDispatchTimer) clearTimeout(deferredDispatchTimer);
 		const gen = generation;
@@ -218,24 +295,34 @@ export default function (pi: ExtensionAPI) {
 		deferredDispatchTimer = setTimeout(() => {
 			deferredDispatchTimer = undefined;
 			if (gen !== generation || state?.status !== "active" || state.id !== stateId) return;
-			if (ctx.isIdle?.() !== true || ctx.hasPendingMessages?.()) {
-				deferScheduleDispatch(ctx, Math.min(Math.max(delay, 100) * 2, 1_000));
+			if (!safeCanDispatch(ctx)) {
+				deferScheduleDispatch(ctx, Math.min(Math.max(delay, 100) * 2, 1_000), kind);
 				return;
 			}
-			scheduleDispatch(ctx);
+			scheduleDispatch(ctx, kind);
 		}, delay);
 	}
 
-	function scheduleDispatch(ctx: ExtensionContext) {
+	function scheduleDispatch(ctx: ExtensionContext, kind: "auto" | "wake" = "auto") {
 		if (!state || state.status !== "active" || awaitingStart) return;
 		if (backoffTimer) return;
-		if (ctx.isIdle?.() !== true || ctx.hasPendingMessages?.()) return;
+		// A pending wait wins over any scheduling nudge: never dispatch through it.
+		if (state.wakeAt && state.wakeAt > Date.now()) {
+			if (!wakeTimer) scheduleWake(state.wakeAt - Date.now(), state.wakeNote);
+			return;
+		}
+		// Previously these returned silently and the loop died until the next user
+		// message. A busy boundary means "retry", not "stop".
+		if (!safeCanDispatch(ctx)) {
+			deferScheduleDispatch(ctx, 100, kind);
+			return;
+		}
 		const delay =
 			consecutiveErrors > 0
 				? Math.min(BACKOFF_BASE_MS * 2 ** Math.min(consecutiveErrors - 1, 6), BACKOFF_MAX_MS)
 				: 0;
 		if (delay === 0) {
-			dispatchContinuation();
+			dispatchContinuation(kind);
 			return;
 		}
 		const gen = generation;
@@ -243,23 +330,25 @@ export default function (pi: ExtensionAPI) {
 		backoffTimer = setTimeout(() => {
 			backoffTimer = undefined;
 			if (gen !== generation || state?.status !== "active") return;
-			if (ctx.isIdle?.() !== true || ctx.hasPendingMessages?.()) {
-				deferScheduleDispatch(ctx, 100);
+			if (!safeCanDispatch(ctx)) {
+				deferScheduleDispatch(ctx, 100, kind);
 				return;
 			}
-			dispatchContinuation();
+			dispatchContinuation(kind);
 		}, delay);
 	}
 
 	// ---------- lifecycle ----------
 
 	function restoreSelectedBranch(ctx: ExtensionContext, reason: string) {
+		lastCtx = ctx;
 		generation++;
 		clearTimers();
 		state = loadState(ctx);
 		consecutiveErrors = 0;
 		lastRunAborted = false;
 		hardStopMessage = undefined;
+		hardStopStreak = 0;
 		nextRunStateId = undefined;
 		currentRunStateId = undefined;
 		currentRunHadOutcome = false;
@@ -295,7 +384,14 @@ export default function (pi: ExtensionAPI) {
 			/* ignore */
 		}
 		updateStatus(ctx);
-		if (state.status === "active") deferScheduleDispatch(ctx);
+		if (state.status !== "active") return;
+		// A wait that was in flight when the process died resumes where it left off.
+		if (state.wakeAt && state.wakeAt > Date.now()) {
+			scheduleWake(state.wakeAt - Date.now(), state.wakeNote);
+			return;
+		}
+		if (state.wakeAt) state.wakeAt = undefined;
+		deferScheduleDispatch(ctx);
 	}
 
 	pi.on("session_start", (event, ctx) => {
@@ -337,6 +433,7 @@ export default function (pi: ExtensionAPI) {
 	// replacement mission is now current; bind accepted prompts to their run so
 	// stale agent_end/tool activity cannot mutate or classify the new mission.
 	pi.on("input", (event, ctx) => {
+		lastCtx = ctx;
 		if (event.source === "extension") {
 			const ownedStateId = ownedPromptStateId(event.text);
 			if (!ownedStateId) return;
@@ -365,12 +462,27 @@ export default function (pi: ExtensionAPI) {
 			updateStatus(ctx);
 			log("woken from dormant by user input");
 		}
-		if (state?.status === "active") nextRunStateId = state.id;
+		if (state?.status === "active") {
+			nextRunStateId = state.id;
+			// A user message preempts any scheduled wait: this run is the wake.
+			if (state.wakeAt) {
+				state.wakeAt = undefined;
+				state.wakeMs = undefined;
+				if (wakeTimer) {
+					clearTimeout(wakeTimer);
+					wakeTimer = undefined;
+				}
+				updateStatus(ctx);
+			}
+		}
 	});
 
 	// ---------- run classification ----------
 
-	pi.on("agent_start", () => {
+	pi.on("agent_start", (_event, ctx) => {
+		lastCtx = ctx;
+		// Cheapest guaranteed-fresh status refresh: timers must not touch a ctx.
+		updateStatus(ctx);
 		currentRunHadOutcome = false;
 		if (nextRunStateId) {
 			currentRunStateId = nextRunStateId;
@@ -382,7 +494,8 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("agent_end", (event) => {
+	pi.on("agent_end", (event, ctx) => {
+		lastCtx = ctx;
 		if (!state || state.status !== "active" || currentRunStateId !== state.id) return;
 		currentRunHadOutcome = true;
 		const final = findFinalAssistant(event.messages);
@@ -399,20 +512,42 @@ export default function (pi: ExtensionAPI) {
 			const message = final.errorMessage ?? "unknown provider error";
 			if (HARD_STOP_RE.test(message)) hardStopMessage = message;
 			return;
-		}
-		consecutiveErrors = 0;
+		}		consecutiveErrors = 0;
 		hardStopMessage = undefined;
+		hardStopStreak = 0;
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
+		lastCtx = ctx;
 		const settledStateId = currentRunStateId;
 		currentRunStateId = undefined;
-		if (!state || state.status !== "active" || settledStateId !== state.id) return;
+		if (!state || state.status !== "active") return;
+		if (settledStateId !== state.id) {
+			// A foreign run (another extension's message, a stray prompt) just ended. The
+			// mission is still active and this is a valid idle boundary: keep the loop
+			// alive instead of silently stopping until the next user message.
+			log(`settled on a non-persistent run (state ${settledStateId ?? "none"}); continuing the mission`);
+			scheduleDispatch(ctx);
+			return;
+		}
 		if (!currentRunHadOutcome) consecutiveErrors++;
 		if (hardStopMessage) {
 			const message = hardStopMessage;
 			hardStopMessage = undefined;
-			goDormant(ctx, `provider hard stop (wakes on your next message): ${truncate(message, 300)}`);
+			hardStopStreak++;
+			if (hardStopStreak >= 2) {
+				goDormant(ctx, `provider hard stop survived one backoff retry (wakes on your next message): ${truncate(message, 300)}`);
+				return;
+			}
+			// First hard stop: stay active and let the exponential backoff retry it.
+			log(`provider hard stop (retrying with backoff, mission stays active): ${truncate(message, 200)}`);
+			try {
+				ctx.ui.notify(`pi-persistent: provider hard error, retrying with backoff: ${truncate(message, 120)}`, "warning");
+			} catch {
+				/* ignore */
+			}
+			consecutiveErrors = Math.max(consecutiveErrors, 1);
+			scheduleDispatch(ctx);
 			return;
 		}
 		if (lastRunAborted) {
@@ -488,6 +623,53 @@ export default function (pi: ExtensionAPI) {
 					},
 				],
 				details: { applied: true },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "persistent_wait",
+		label: "Persistent wait",
+		description: WAIT_TOOL_DESCRIPTION,
+		promptSnippet: "persistent_wait: sleep then self-wake, mission stays active (persistent mode)",
+		parameters: Type.Object({
+			persistent_id: Type.String({
+				description: "Exact persistent id shown in the latest persistent prompt",
+				minLength: 1,
+				maxLength: 100,
+			}),
+			wait_seconds: Type.Number({
+				description: "How long to sleep before the host wakes you again (clamped to 5-3600s)",
+				minimum: 0,
+			}),
+			check_next: Type.Optional(
+				Type.String({ description: "What to look at on wake", maxLength: 400 }),
+			),
+		}),
+		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+			lastCtx = ctx;
+			if (!state || state.status !== "active") {
+				return {
+					content: [{ type: "text", text: "Persistent mode is not active; this call is a no-op." }],
+					details: { applied: false },
+				};
+			}
+			if (params.persistent_id !== state.id) {
+				return {
+					content: [{ type: "text", text: `Rejected stale persistent_wait call for id ${params.persistent_id}; current id is ${state.id}.` }],
+					details: { applied: false, stale: true },
+				};
+			}
+			const seconds = Math.min(Math.max(Math.round(params.wait_seconds) || 60, 5), 3600);
+			scheduleWake(seconds * 1000, params.check_next);
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Persistent mode stays active and will wake itself in ${seconds}s. Nothing to do now — end the turn without dormant.`,
+					},
+				],
+				details: { applied: true, waitSeconds: seconds },
 			};
 		},
 	});

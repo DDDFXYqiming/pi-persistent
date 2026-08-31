@@ -1,7 +1,7 @@
 {
 	"name": "pi-persistent",
-	"version": "0.2.0",
-	"description": "Resident autonomous mode for the Pi Coding Agent: /persistent <mission> keeps working and self-finding in-scope follow-ups until /sleep.",
+	"version": "0.3.0",
+	"description": "Resident autonomous mode for the Pi Coding Agent: /persistent <mission> keeps working, waiting and self-finding in-scope follow-ups until /sleep.",
 	"type": "module",
 	"scripts": {
 		"typecheck": "tsc -p tsconfig.json",

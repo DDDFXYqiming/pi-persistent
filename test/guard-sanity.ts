@@ -91,6 +91,22 @@ expectCommand("node -e \"require('fs').writeFileSync(process.env.TEMP + '/escape
 expectCommand("python -c \"open(r'C:\\\\Temp\\\\escape.txt','w').write('x')\"", true);
 expectCommand("git -C C:\\Temp reset --hard", true);
 
+// false-positive regressions: prose or a read-source is not a write target
+expectCommand("npm install ../local-pkg", false); // monorepo local package
+expectCommand("pip3 install -e ../pkg", false);
+expectCommand('echo "see ~/docs" > notes.md', false); // `~/docs` is prose inside an echo argument
+expectCommand('echo "log at $env:TEMP/x" > notes.md', false);
+expectCommand('git commit -m "handle /tmp and ~/.cache cleanup"', false);
+expectCommand('echo "path: C:\\\\Windows\\\\win.ini" > notes.md', false); // absolute path inside echo prose
+
+// still blocked when the outside path is the real write target
+expectCommand("cp a.txt ../out/b.txt", true);
+expectCommand("touch ../x", true);
+expectCommand("rm -rf ../node_modules", true);
+expectCommand('Set-Content "notes\\..\\..\\escape.txt" x', true);
+expectCommand("echo x > ../escape.txt", true);
+expectCommand("echo x > $env:USERPROFILE\\escape.txt", true);
+
 rmSync(base, { recursive: true, force: true });
 
 if (failures.length > 0) {
