@@ -89,6 +89,13 @@ const DENY_PATTERNS: Array<[RegExp, string]> = [
 
 const WRITE_TOKEN_RE =
 	/(?:>>|>)|\btee\b|\bout-file\b|\bset-content\b|\badd-content\b|\bnew-item\b|\bmkdir\b|\bmd\s+\S|\bcp\b|\bcopy\b|\bmv\b|\bmove\b|\bxcopy\b|\brobocopy\b|\brm\b|\bdel\b|\bremove-item\b|\berase\b|\bunlink\b|\btruncate\b|\btouch\b|\bnpm\s+(?:install|i)\b|\bpip3?\s+install\b|\bcurl\b[^|&;]*\s+-o\b|\bwget\b|\binvoke-webrequest\b/i;
+const INLINE_SCRIPT_WRITE_RE =
+	/\b(?:writefilesync|appendfilesync|writefile|appendfile|createwritestream|write_text|write_bytes)\b|\b(?:opensync|open)\s*\([^)]*,\s*["'](?:w|a|x)|\bsystem\.io\.file\]?::(?:write|append)/i;
+const GIT_MUTATION_RE =
+	/\bgit\b[^|&;]*(?:\badd\b|\bcommit\b|\bcheckout\b|\bswitch\b|\breset\b|\bclean\b|\bmerge\b|\brebase\b|\bpull\b|\bfetch\b|\bstash\b|\bworktree\b|\brestore\b|\brm\b|\bmv\b)/i;
+const TRAVERSAL_RE = /(?:^|[\s"'=(;])\.\.(?:[\\/]|(?=\s|$))/;
+const OUTSIDE_ENV_RE =
+	/(?:~[\\/]|%(?:USERPROFILE|HOME|TEMP|TMP|APPDATA|LOCALAPPDATA)%|\$env:(?:USERPROFILE|HOME|TEMP|TMP|APPDATA|LOCALAPPDATA)\b|\$\{?(?:HOME|USERPROFILE|TEMP|TMP)\}?\b|process\.env\.(?:HOME|USERPROFILE|TEMP|TMP)\b)/i;
 
 const DRIVE_PATH_RE = /[a-z]:[\\/][^\s"'|&;<>)]*/gi;
 const UNIX_ABS_RE = /(?:^|[\s;|(=])(\/[^\s"'|&;<>)]*)/g;
@@ -111,11 +118,21 @@ export function checkCommand(command: string, rootReal: string): CommandCheck {
 	for (const [pattern, reason] of DENY_PATTERNS) {
 		if (pattern.test(command)) return { denial: `command ${reason}` };
 	}
-	if (!WRITE_TOKEN_RE.test(command)) return {};
+	// File-descriptor duplication (for example `2>&1`) does not write a path.
+	// Remove it before looking for filesystem redirection tokens.
+	const writeScan = command.replace(/\b\d*\s*>\s*&\s*\d+\b/g, "");
+	const mayWrite = WRITE_TOKEN_RE.test(writeScan) || INLINE_SCRIPT_WRITE_RE.test(writeScan) || GIT_MUTATION_RE.test(writeScan);
+	if (!mayWrite) return {};
+	if (TRAVERSAL_RE.test(writeScan)) {
+		return { denial: "write-capable command uses parent-directory traversal" };
+	}
+	if (OUTSIDE_ENV_RE.test(writeScan)) {
+		return { denial: "write-capable command targets a home/temp environment path" };
+	}
 
 	// URLs contain "p://..." fragments that look like drive paths; strip them
 	// before absolute-path extraction.
-	const scanned = command.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "");
+	const scanned = writeScan.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "");
 	const candidates: string[] = [];
 	for (const match of scanned.matchAll(DRIVE_PATH_RE)) {
 		candidates.push(stripEdge(match[0]));

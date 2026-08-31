@@ -49,6 +49,7 @@ const child = spawn(
 	[
 		"--mode", "rpc",
 		"--offline",
+		"--no-extensions",
 		"--model", MODEL,
 		"--session-dir", SESS,
 		"-e", EXT,

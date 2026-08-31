@@ -27,6 +27,7 @@ import {
 	buildContinuationPrompt,
 	buildKickoffPrompt,
 	CHECKPOINT_TOOL_DESCRIPTION,
+	ownedPromptStateId,
 	DORMANT_TOOL_DESCRIPTION,
 } from "./prompts.ts";
 import {
@@ -48,7 +49,15 @@ const HARD_STOP_RE =
 const BACKOFF_BASE_MS = 10_000;
 const BACKOFF_MAX_MS = 300_000;
 const DELIVERY_WATCHDOG_MS = 15_000;
-const MAX_DELIVERY_RETRIES = 3;
+
+interface AwaitingStart {
+	seq: number;
+	generation: number;
+	stateId: string;
+	prompt: string;
+	retries: number;
+	timer?: ReturnType<typeof setTimeout>;
+}
 
 export default function (pi: ExtensionAPI) {
 	log("loaded (awaiting /persistent <mission>)");
@@ -59,8 +68,12 @@ export default function (pi: ExtensionAPI) {
 	let lastRunAborted = false;
 	let hardStopMessage: string | undefined;
 	let backoffTimer: ReturnType<typeof setTimeout> | undefined;
+	let deferredDispatchTimer: ReturnType<typeof setTimeout> | undefined;
 	let dispatchSeq = 0;
-	let awaitingStart: { seq: number; retries: number; timer: ReturnType<typeof setTimeout> } | undefined;
+	let awaitingStart: AwaitingStart | undefined;
+	let nextRunStateId: string | undefined;
+	let currentRunStateId: string | undefined;
+	let currentRunHadOutcome = false;
 
 	function log(message: string) {
 		console.error(`[pi-persistent] ${message}`);
@@ -69,7 +82,9 @@ export default function (pi: ExtensionAPI) {
 	function persist() {
 		if (!state) return;
 		try {
-			pi.appendEntry(STATE_ENTRY_TYPE, { state });
+			// SessionManager retains custom-entry data by reference in memory. Store an
+			// immutable snapshot so later mutations cannot rewrite older branch states.
+			pi.appendEntry(STATE_ENTRY_TYPE, { state: structuredClone(state) });
 		} catch (error) {
 			log(`appendEntry failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -80,8 +95,12 @@ export default function (pi: ExtensionAPI) {
 			clearTimeout(backoffTimer);
 			backoffTimer = undefined;
 		}
+		if (deferredDispatchTimer) {
+			clearTimeout(deferredDispatchTimer);
+			deferredDispatchTimer = undefined;
+		}
 		if (awaitingStart) {
-			clearTimeout(awaitingStart.timer);
+			if (awaitingStart.timer) clearTimeout(awaitingStart.timer);
 			awaitingStart = undefined;
 		}
 	}
@@ -145,38 +164,72 @@ export default function (pi: ExtensionAPI) {
 		log(`off: ${truncate(reason, 120)}`);
 	}
 
+	function deliverOwnedPrompt(intent: AwaitingStart, deliverAs: "steer" | "followUp") {
+		if (
+			awaitingStart?.seq !== intent.seq ||
+			intent.generation !== generation ||
+			state?.status !== "active" ||
+			state.id !== intent.stateId
+		) {
+			return;
+		}
+		try {
+			pi.sendUserMessage(intent.prompt, { deliverAs });
+		} catch (error) {
+			log(`owned prompt send failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (awaitingStart?.seq !== intent.seq) return;
+		const delay = Math.min(DELIVERY_WATCHDOG_MS * 2 ** Math.min(intent.retries, 4), BACKOFF_MAX_MS);
+		intent.timer = setTimeout(() => {
+			if (awaitingStart?.seq !== intent.seq) return;
+			intent.retries++;
+			log(`resending owned prompt (attempt ${intent.retries + 1}, state ${intent.stateId})`);
+			deliverOwnedPrompt(intent, "followUp");
+		}, delay);
+	}
+
+	function beginOwnedDelivery(prompt: string, stateId: string, deliverAs: "steer" | "followUp") {
+		if (awaitingStart?.stateId === stateId && awaitingStart.prompt === prompt) return;
+		if (awaitingStart?.timer) clearTimeout(awaitingStart.timer);
+		const intent: AwaitingStart = {
+			seq: ++dispatchSeq,
+			generation,
+			stateId,
+			prompt,
+			retries: 0,
+		};
+		awaitingStart = intent;
+		deliverOwnedPrompt(intent, deliverAs);
+	}
+
 	function dispatchContinuation() {
-		if (!state || state.status !== "active") return;
+		if (!state || state.status !== "active" || awaitingStart) return;
 		state.iteration++;
 		state.updatedAt = Date.now();
 		persist();
-		const seq = ++dispatchSeq;
-		const prompt = buildContinuationPrompt(state, state.iteration);
-		pi.sendUserMessage(prompt);
-		// Delivery watchdog: if the sent prompt never started a run, resend.
+		beginOwnedDelivery(buildContinuationPrompt(state, state.iteration), state.id, "followUp");
+	}
+
+	function deferScheduleDispatch(ctx: ExtensionContext, delay = 0) {
+		if (!state || state.status !== "active") return;
+		if (deferredDispatchTimer) clearTimeout(deferredDispatchTimer);
 		const gen = generation;
-		const timer = setTimeout(() => {
-			if (gen !== generation || state?.status !== "active") return;
-			if (!awaitingStart || awaitingStart.seq !== seq) return;
-			if (awaitingStart.retries >= MAX_DELIVERY_RETRIES) {
-				log(`continuation #${state.iteration} not delivered after ${awaitingStart.retries} retries; waiting for the next settled boundary`);
-				awaitingStart = undefined;
+		const stateId = state.id;
+		deferredDispatchTimer = setTimeout(() => {
+			deferredDispatchTimer = undefined;
+			if (gen !== generation || state?.status !== "active" || state.id !== stateId) return;
+			if (ctx.isIdle?.() !== true || ctx.hasPendingMessages?.()) {
+				deferScheduleDispatch(ctx, Math.min(Math.max(delay, 100) * 2, 1_000));
 				return;
 			}
-			awaitingStart.retries++;
-			log(`resending continuation #${state.iteration} (attempt ${awaitingStart.retries + 1})`);
-			pi.sendUserMessage(prompt);
-			awaitingStart.timer = timer;
-		}, DELIVERY_WATCHDOG_MS);
-		if (awaitingStart) clearTimeout(awaitingStart.timer);
-		awaitingStart = { seq, retries: 0, timer };
+			scheduleDispatch(ctx);
+		}, delay);
 	}
 
 	function scheduleDispatch(ctx: ExtensionContext) {
-		if (!state || state.status !== "active") return;
+		if (!state || state.status !== "active" || awaitingStart) return;
 		if (backoffTimer) return;
-		if (ctx.isIdle?.() === false) return;
-		if (ctx.hasPendingMessages?.()) return;
+		if (ctx.isIdle?.() !== true || ctx.hasPendingMessages?.()) return;
 		const delay =
 			consecutiveErrors > 0
 				? Math.min(BACKOFF_BASE_MS * 2 ** Math.min(consecutiveErrors - 1, 6), BACKOFF_MAX_MS)
@@ -186,51 +239,123 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		const gen = generation;
-		log(`provider errors: ${consecutiveErrors}; retrying continuation in ${Math.round(delay / 1000)}s (backoff only, the mission stays active)`);
+		log(`provider/delivery errors: ${consecutiveErrors}; retrying continuation in ${Math.round(delay / 1000)}s (backoff only, the mission stays active)`);
 		backoffTimer = setTimeout(() => {
 			backoffTimer = undefined;
 			if (gen !== generation || state?.status !== "active") return;
-			if (ctx.isIdle?.() === false) return;
-			if (ctx.hasPendingMessages?.()) return;
+			if (ctx.isIdle?.() !== true || ctx.hasPendingMessages?.()) {
+				deferScheduleDispatch(ctx, 100);
+				return;
+			}
 			dispatchContinuation();
 		}, delay);
 	}
 
 	// ---------- lifecycle ----------
 
-	pi.on("session_start", (_event, ctx) => {
-		const loaded = loadState(ctx);
-		state = loaded;
+	function restoreSelectedBranch(ctx: ExtensionContext, reason: string) {
 		generation++;
 		clearTimers();
+		state = loadState(ctx);
 		consecutiveErrors = 0;
 		lastRunAborted = false;
 		hardStopMessage = undefined;
-		if (state && state.status !== "off") {
-			state.workspaceRoot = resolveRealRoot(state.workspaceRoot);
+		nextRunStateId = undefined;
+		currentRunStateId = undefined;
+		currentRunHadOutcome = false;
+		if (!state || state.status === "off") {
+			updateStatus(ctx);
+			return;
+		}
+
+		state.workspaceRoot = resolveRealRoot(state.workspaceRoot);
+		const currentRoot = resolveRealRoot(ctx.cwd);
+		const sameRoot = isInsideRoot(state.workspaceRoot, currentRoot) && isInsideRoot(currentRoot, state.workspaceRoot);
+		if (!sameRoot) {
+			state.status = "off";
+			state.reason = `workspace changed from ${state.workspaceRoot} to ${currentRoot}; start a new /persistent mission`;
+			state.workspaceRoot = currentRoot;
+			state.updatedAt = Date.now();
+			persist();
+			updateStatus(ctx);
 			try {
-				ctx.ui.notify(
-					`pi-persistent: restored ${state.status} mission (auto ${state.iteration}). Use /sleep to stop it.`,
-					"info",
-				);
+				ctx.ui.notify(`pi-persistent disabled after ${reason}: workspace changed. Start a new mission explicitly.`, "warning");
 			} catch {
 				/* ignore */
 			}
+			return;
+		}
+
+		try {
+			ctx.ui.notify(
+				`pi-persistent: restored ${state.status} mission (auto ${state.iteration}). Use /sleep to stop it.`,
+				"info",
+			);
+		} catch {
+			/* ignore */
 		}
 		updateStatus(ctx);
+		if (state.status === "active") deferScheduleDispatch(ctx);
+	}
+
+	pi.on("session_start", (event, ctx) => {
+		restoreSelectedBranch(ctx, event.reason);
+	});
+
+	pi.on("session_tree", (_event, ctx) => {
+		restoreSelectedBranch(ctx, "session tree navigation");
+	});
+
+	pi.on("session_before_compact", (_event) => {
+		if (state?.status === "active") clearTimers();
+	});
+
+	pi.on("session_compact", (event, ctx) => {
+		if (!state || state.status !== "active" || event.willRetry) return;
+		lastRunAborted = false;
+		deferScheduleDispatch(ctx);
+	});
+
+	pi.on("session_compact_failed", (event, ctx) => {
+		if (!state || state.status !== "active" || event.willRetry) return;
+		lastRunAborted = false;
+		deferScheduleDispatch(ctx);
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		persist();
+		generation++;
 		clearTimers();
-		updateStatus(ctx);
+		try {
+			ctx.ui.setStatus(STATUS_KEY, undefined);
+		} catch {
+			/* ignore */
+		}
 	});
 
-	// Any real user input (interactive or RPC) wakes a dormant mission. The
-	// extension's own continuation prompts arrive with source "extension" and
-	// are ignored here; /persistent and /sleep manage their own state.
+	// Extension-owned messages carry a mission id. Drop a delayed prompt when a
+	// replacement mission is now current; bind accepted prompts to their run so
+	// stale agent_end/tool activity cannot mutate or classify the new mission.
 	pi.on("input", (event, ctx) => {
-		if (event.source === "extension") return;
+		if (event.source === "extension") {
+			const ownedStateId = ownedPromptStateId(event.text);
+			if (!ownedStateId) return;
+			if (!state || state.status !== "active" || state.id !== ownedStateId) {
+				log(`discarded stale owned prompt for state ${ownedStateId}`);
+				return { action: "handled" as const };
+			}
+			if (awaitingStart?.stateId === ownedStateId) {
+				if (awaitingStart.timer) clearTimeout(awaitingStart.timer);
+				awaitingStart = undefined;
+			}
+			// Pi may deliver steer/followUp work inside the current high-level agent
+			// cycle without another agent_start event. Bind both the current and next
+			// observed run to the accepted mission id.
+			currentRunStateId = ownedStateId;
+			nextRunStateId = ownedStateId;
+			currentRunHadOutcome = false;
+			return;
+		}
 		if (/^\/(?:persistent|sleep)\b/.test(event.text.trimStart())) return;
 		if (state?.status === "dormant") {
 			state.status = "active";
@@ -240,21 +365,31 @@ export default function (pi: ExtensionAPI) {
 			updateStatus(ctx);
 			log("woken from dormant by user input");
 		}
+		if (state?.status === "active") nextRunStateId = state.id;
 	});
 
 	// ---------- run classification ----------
 
 	pi.on("agent_start", () => {
-		if (awaitingStart) {
-			clearTimeout(awaitingStart.timer);
+		currentRunHadOutcome = false;
+		if (nextRunStateId) {
+			currentRunStateId = nextRunStateId;
+			nextRunStateId = undefined;
+		}
+		if (awaitingStart && currentRunStateId === awaitingStart.stateId) {
+			if (awaitingStart.timer) clearTimeout(awaitingStart.timer);
 			awaitingStart = undefined;
 		}
 	});
 
 	pi.on("agent_end", (event) => {
-		if (!state || state.status !== "active") return;
+		if (!state || state.status !== "active" || currentRunStateId !== state.id) return;
+		currentRunHadOutcome = true;
 		const final = findFinalAssistant(event.messages);
-		if (!final) return;
+		if (!final) {
+			consecutiveErrors++;
+			return;
+		}
 		if (final.stopReason === "aborted") {
 			lastRunAborted = true;
 			return;
@@ -270,7 +405,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		if (!state || state.status !== "active") return;
+		const settledStateId = currentRunStateId;
+		currentRunStateId = undefined;
+		if (!state || state.status !== "active" || settledStateId !== state.id) return;
+		if (!currentRunHadOutcome) consecutiveErrors++;
 		if (hardStopMessage) {
 			const message = hardStopMessage;
 			hardStopMessage = undefined;
@@ -278,8 +416,8 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (lastRunAborted) {
-			// The user interrupted on purpose; their next message drives the next turn,
-			// and the loop resumes from its settled boundary afterwards.
+			// A direct user interruption does not self-restart. Manual compaction clears
+			// this flag in session_compact/session_compact_failed and schedules there.
 			lastRunAborted = false;
 			return;
 		}
@@ -316,6 +454,11 @@ export default function (pi: ExtensionAPI) {
 		description: DORMANT_TOOL_DESCRIPTION,
 		promptSnippet: "persistent_dormant: stop autonomous continuation (persistent mode)",
 		parameters: Type.Object({
+			persistent_id: Type.String({
+				description: "Exact persistent id shown in the latest persistent prompt",
+				minLength: 1,
+				maxLength: 100,
+			}),
 			reason: Type.String({
 				description:
 					"Concrete reason: what user input / outside authorization is required, or the evidence that the mission is fully satisfied",
@@ -324,10 +467,16 @@ export default function (pi: ExtensionAPI) {
 			}),
 		}),
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-			if (!state || state.status === "off") {
+			if (!state || state.status !== "active") {
 				return {
 					content: [{ type: "text", text: "Persistent mode is not active; this call is a no-op." }],
 					details: { applied: false },
+				};
+			}
+			if (params.persistent_id !== state.id) {
+				return {
+					content: [{ type: "text", text: `Rejected stale persistent_dormant call for id ${params.persistent_id}; current id is ${state.id}.` }],
+					details: { applied: false, stale: true },
 				};
 			}
 			goDormant(ctx, params.reason);
@@ -349,6 +498,11 @@ export default function (pi: ExtensionAPI) {
 		description: CHECKPOINT_TOOL_DESCRIPTION,
 		promptSnippet: "persistent_checkpoint: update the mission checkpoint (persistent mode)",
 		parameters: Type.Object({
+			persistent_id: Type.String({
+				description: "Exact persistent id shown in the latest persistent prompt",
+				minLength: 1,
+				maxLength: 100,
+			}),
 			last_known_state: Type.String({
 				description: "Where the work stands right now, evidence-based",
 				minLength: 1,
@@ -365,10 +519,16 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-			if (!state || state.status === "off") {
+			if (!state || state.status !== "active") {
 				return {
 					content: [{ type: "text", text: "Persistent mode is not active; this call is a no-op." }],
 					details: { applied: false },
+				};
+			}
+			if (params.persistent_id !== state.id) {
+				return {
+					content: [{ type: "text", text: `Rejected stale persistent_checkpoint call for id ${params.persistent_id}; current id is ${state.id}.` }],
+					details: { applied: false, stale: true },
 				};
 			}
 			state.checkpoint = {
@@ -420,6 +580,7 @@ export default function (pi: ExtensionAPI) {
 					} catch {
 						/* ignore */
 					}
+					dispatchContinuation();
 				} else {
 					try {
 						ctx.ui.notify(`pi-persistent: ${statusLabel(state)}`, "info");
@@ -439,6 +600,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			generation++;
 			clearTimers();
+			nextRunStateId = undefined;
 			consecutiveErrors = 0;
 			lastRunAborted = false;
 			hardStopMessage = undefined;
@@ -462,7 +624,7 @@ export default function (pi: ExtensionAPI) {
 				/* ignore */
 			}
 			log(`started mission ${state.id} in ${state.workspaceRoot}`);
-			pi.sendUserMessage(buildKickoffPrompt(state));
+			beginOwnedDelivery(buildKickoffPrompt(state), state.id, ctx.isIdle?.() === true ? "followUp" : "steer");
 		},
 	});
 

