@@ -96,7 +96,7 @@ const WRITE_TOKEN_RE =
 const INLINE_SCRIPT_WRITE_RE =
 	/\b(?:writefilesync|appendfilesync|writefile|appendfile|createwritestream|write_text|write_bytes)\b|\b(?:opensync|open)\s*\([^)]*,\s*["'](?:w|a|x)|\bsystem\.io\.file\]?::(?:write|append)/i;
 const GIT_MUTATION_RE =
-	/\bgit\b[^|&;]*(?:\badd\b|\bcommit\b|\bcheckout\b|\bswitch\b|\breset\b|\bclean\b|\bmerge\b|\brebase\b|\bpull\b|\bfetch\b|\bstash\b|\bworktree\b|\brestore\b|\brm\b|\bmv\b)/i;
+	/\bgit\b[^|&;]*(?:\badd\b|\bcommit\b|\bcheckout\b|\bswitch\b|\breset\b|\bclean\b|\bmerge\b|\brebase\b|\bpull\b|\bfetch\b|\bstash\b|\bworktree\b|\brestore\b|\brm\b|\bmv\b|\bpush\b)/i;
 
 /**
  * Commands whose positional arguments ARE filesystem targets. Deliberately
@@ -196,7 +196,7 @@ function writeTargets(command: string): string[] {
 		}
 		if (verbIndex < 0) continue;
 		for (const token of tokens.slice(verbIndex + 1)) {
-			if (!token || /^[-/]/.test(token) || /^[<>]/.test(token)) continue;
+			if (!token || (/^[-/]/.test(token) && token !== "/") || /^[<>]/.test(token)) continue; // bare / is a path, not a flag
 			targets.push(token);
 		}
 	}

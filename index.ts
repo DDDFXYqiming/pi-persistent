@@ -512,7 +512,8 @@ export default function (pi: ExtensionAPI) {
 			const message = final.errorMessage ?? "unknown provider error";
 			if (HARD_STOP_RE.test(message)) hardStopMessage = message;
 			return;
-		}		consecutiveErrors = 0;
+		}
+		consecutiveErrors = 0;
 		hardStopMessage = undefined;
 		hardStopStreak = 0;
 	});
@@ -806,7 +807,14 @@ export default function (pi: ExtensionAPI) {
 				/* ignore */
 			}
 			log(`started mission ${state.id} in ${state.workspaceRoot}`);
-			beginOwnedDelivery(buildKickoffPrompt(state), state.id, ctx.isIdle?.() === true ? "followUp" : "steer");
+			// A dead ctx throws on any property access; degrade to steer so the kickoff is not lost.
+			let idle = false;
+			try {
+				idle = ctx.isIdle?.() === true;
+			} catch {
+				/* stale ctx → not idle */
+			}
+			beginOwnedDelivery(buildKickoffPrompt(state), state.id, idle ? "followUp" : "steer");
 		},
 	});
 
