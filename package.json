@@ -1,15 +1,19 @@
 {
 	"name": "pi-persistent",
-	"version": "0.3.1",
+	"version": "0.4.0",
 	"description": "Resident autonomous mode for the Pi Coding Agent: /persistent <mission> keeps working, waiting and self-finding in-scope follow-ups until /sleep.",
 	"type": "module",
 	"scripts": {
 		"typecheck": "tsc -p tsconfig.json",
-		"test": "npm run typecheck && npm run test:guard",
+		"test": "npm run typecheck && npm run test:guard && npm run test:menu && npm run test:menu:tui && npm run test:compaction",
+		"test:compaction": "node test/compaction-sanity.ts",
 		"test:guard": "node test/guard-sanity.ts",
+		"test:menu": "node test/menu-sanity.ts",
+		"test:menu:tui": "node test/menu-tui.ts",
 		"test:e2e:qwen": "node test/probe-qwen-flows.mjs",
 		"test:e2e:restore": "node test/drive-qwen-restore.mjs",
-		"test:e2e:fork": "node test/probe-qwen-fork.mjs"
+		"test:e2e:fork": "node test/probe-qwen-fork.mjs",
+		"test:e2e:compact": "node test/manual-compact-e2e.mjs"
 	},
 	"license": "MIT",
 	"author": "DDDFXYqiming",
@@ -31,6 +35,7 @@
 		]
 	},
 	"dependencies": {
+		"@narumitw/pi-tui-kit": "^0.59.0",
 		"typebox": "1.3.18"
 	},
 	"peerDependencies": {

@@ -19,6 +19,7 @@ Continuation and persistence mechanics follow the proven patterns of [@narumitw/
 - **STEERING.** The newest user message is the current top priority. The model executes it first, then resumes the mission. This is rule 7 plus a steering check line in every continuation, and the model was verified to comply.
 - **Zero user-blocking.** Notifications go through `ui.notify` (a toast) only. The `confirm` / `select` / `input` blocking primitives are never called, and the loop never waits on the user.
 - **Lifecycle self-healing.** `/persistent resume` and a successful manual `/compact` schedule the next continuation immediately, and finishing a manual compaction is not treated as a user interruption. An active mission restored after a crash or restart auto-resumes, and an unexpired `persistent_wait` is re-armed for its remaining time. Session tree navigation reloads state from the selected branch. Forking into a different workspace disables the mission and asks for an explicit new one.
+- **Compaction guard (v0.4.0).** Long missions reliably outgrow pi's default compaction: under "preserve all existing information" the chained summary grows monotonically while the summarization call's output budget is the constant `min(0.8 × reserveTokens, model.maxTokens)`. Once the summary lands on that ceiling every compaction fails with "hit the token cap", the context never shrinks and the session deadlocks at the threshold. The plugin takes over `session_before_compact` with a bounded, explicitly lossy handoff: an oversized previous summary is condensed first, then merged with the new turns; the auxiliary request never carries a thinking level; an overshoot or a `length` stop triggers one compression pass, and a failing model path falls back to a deterministic local truncation. Compaction always returns a result, and the full history stays in the session file.
 - **No silent leaks.** If the host is momentarily busy at a settled boundary (`isIdle()` false / messages queued), the dispatcher now polls instead of returning — the old build dropped that one dispatch and the loop stayed dead until the user spoke again. A run owned by a foreign extension message (no mission marker) is still treated as a valid idle boundary and continues the mission; the old build recognised no owner and stopped forever.
 
 ## Workspace boundary (enforced while active)
@@ -34,6 +35,26 @@ The shell scanner is heuristic and meant to stop accidental damage. A determined
 **A block is not a stop.** Every block reason now ends with a fixed line saying that this denies one action only, that the mission is not finished and persistent mode is not stopped, and asks the agent to move that step's side effects inside the root and continue. The old text said "if you cannot proceed, call persistent_dormant" — which handed the model an exit ramp on every single denial and was the number one cause of early stopping.
 
 **Only real write targets are inspected.** The path check no longer substring-matches the whole command. It first works out where the command actually writes: redirect targets, positional arguments of path-taking commands (`cp` / `mv` / `rm` / `tee` / `Set-Content` / `mkdir` / …), `-o` / `--output` / `-OutFile` values, and string literals inside inline interpreter writes (`writeFileSync`, `open(...,'w')`). Git-bash paths, `~` and `$env:TEMP` are expanded, then compared by realpath. So `npm install ../local-pkg`, `echo "see ~/docs" > notes.md` and `git commit -m "handle /tmp cleanup"` no longer misfire, while `echo x > ..\escape.txt`, `cp a.txt ../out/b.txt` and `git -C C:\Temp reset --hard` still block.
+
+## Compaction guard configuration
+
+Optional file `~/.pi/agent/pi-persistent.json`; these are the defaults when it is absent, unknown keys are ignored:
+
+```jsonc
+{
+  "compaction": {
+    "mode": "always",         // always guards every compaction; persistent only while a mission exists; off restores pi's default
+    "targetTokens": 3000,     // target size of the produced summary
+    "maxInputChars": 24000,   // serialization budget for the new turns
+    "maxOutputTokens": 16384, // auxiliary request output cap, clamped to the model's own cap
+    "timeoutMs": 180000,
+    "provider": "",           // optional fixed summarizer, paired with model; empty reuses the session model
+    "model": ""
+  }
+}
+```
+
+Guard requests use fresh routing session ids, never write the prompt cache, and never send a reasoning option.
 
 ## Install
 
@@ -82,7 +103,8 @@ All of the below ran in isolated workspaces (`.tmp/<probe>/workspace` with a ded
 - **Flow matrix 7/7** (`node test/probe-qwen-flows.mjs`). True automatic continuation, `/persistent resume` dispatching immediately, shell relative-path plus interpreter escape blocked, continuation after manual compaction, stale tool calls rejected by id after a mid-run mission replacement, zero extension errors, zero delivery resends.
 - **Crash restore PASS** (`node test/drive-qwen-restore.mjs`). An active mission's process is force-killed mid long-command; the restart auto-resumes with no user input, finishes the remaining work, then dormants.
 - **Cross-project fork PASS** (`node test/probe-qwen-fork.mjs`). Forking an active session into another cwd forces the mission `off` and asks for an explicit new one.
-- Test entry points. `npm test` runs typecheck plus the guard unit tests. Five E2E scripts: `drive-rpc.mjs`, `probe-continuity.mjs`, `probe-qwen-flows.mjs`, `drive-qwen-restore.mjs`, `probe-qwen-fork.mjs`, all defaulting to `minimax/MiniMax-M3` at `high`, overridable with `PI_E2E_MODEL` / `PI_E2E_THINKING`.
+- **Compaction guard 13 offline + E2E 7/7** (`node test/compaction-sanity.ts`, `npm run test:e2e:compact`). The offline suite covers the mode matrix, config clamping, transcript thinking-drop and tail capping, the two-phase condense-then-merge, the `length`/overshoot compression retry, the deterministic fallback when the model path fails, abort passthrough and file-list capping. The E2E runs in an isolated `PI_CODING_AGENT_DIR` temp dir (`keepRecentTokens: 50`) against the real `aliyun-tokenplan/qwen3.8-flash` with `--thinking high`, fires the RPC `{"type":"compact"}` command and asserts the guard took over (`details.guard="pi-persistent"` in the session entry), the summary is structured, the session continues after compaction, and no extension errors occurred.
+- Test entry points. `npm test` runs typecheck plus the guard and compaction unit tests. Six E2E scripts: `drive-rpc.mjs`, `probe-continuity.mjs`, `probe-qwen-flows.mjs`, `drive-qwen-restore.mjs`, `probe-qwen-fork.mjs`, `manual-compact-e2e.mjs`, all defaulting to `minimax/MiniMax-M3` at `high`, overridable with `PI_E2E_MODEL` / `PI_E2E_THINKING`.
 
 
 ## Permissions
@@ -90,4 +112,5 @@ All of the below ran in isolated workspaces (`.tmp/<probe>/workspace` with a ded
 - Intercepts `write` / `edit` / `bash` / `powershell` tool calls (block plus reason), only while the mode is active
 - Appends `persistent-state` custom session entries for state (immutable snapshots, including the pending `persistent_wait` deadline), stored inside the session file with nothing else written to disk
 - `ui.notify` toasts plus `ui.setStatus` status text
-- No conversation image access, no network access, no blocking UI primitives
+- Issues auxiliary model requests while the compaction guard is active (fresh routing session ids, no prompt-cache writes, no reasoning option)
+- No conversation image access, no blocking UI primitives; no network beyond the auxiliary summarization requests

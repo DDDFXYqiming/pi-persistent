@@ -19,6 +19,7 @@
 - **STEERING 引导。** 最新用户消息是当前最高优先级，模型先执行它，再回任务。这条检查写在规则 7 和每条续派的首行里，实测模型会照做。
 - **对用户零阻塞。** 通知只走 `ui.notify`（toast），从不调用 `confirm` / `select` / `input` 这类阻塞原语。循环永不等待用户。
 - **生命周期自愈。** `/persistent resume` 和手动 `/compact` 成功后立即调度续派，manual compaction 结束不算用户中断。进程崩溃或重启后 restore 的 active mission 自动续跑，未到期的 `persistent_wait` 按剩余时间重新计时。会话树导航按所选分支重载状态。跨项目 fork 检测到工作区变更时强制停机，要求显式重开 mission。
+- **压缩守护（v0.4.0）。** 长跑 mission 必然撞上 pi 默认压缩的上限：摘要链在 "preserve all existing information" 指令下单调增长，而摘要请求的输出预算被钉死在 `min(0.8×reserveTokens, model.maxTokens)` 这个常数上，贴死之后每次压缩都报 "hit the token cap"，上下文缩不回去，会话在阈值处死锁。插件默认接管 `session_before_compact`，改为有界有损交接：先把过大的旧摘要压回目标尺寸，再与增量消息合并；辅助请求从不携带思考档位；输出超限或模型路径失败时先做一次压缩重试，再兜底为本地确定性截断。压缩永远产出结果，完整历史仍留在会话文件里。
 - **边界不漏跑。** settled 时如果宿主暂时忙（`isIdle()` 假 / 有排队消息）转轮询重试而不是直接 return——旧版在此静默丢掉一次派发，循环会一直接不到直到用户再发言。别的扩展插入一条无 mission 标记的消息后，settled 仍视为有效空闲边界继续续跑（旧版认不出归属就永久停下）。
 
 ## 工作区边界（常驻期间强制）
@@ -34,6 +35,26 @@ shell 扫描是启发式的，防误不防恶。需要强隔离的 mission 请�
 **拦截不等于停机。** 拦截回传文本结尾固定是一句：“这仅拒绍这一个动作，mission 未结束、常驻模式未停止”，并要求它把该步副作用改到工作区内继续。旧版这里写的是“做不到就调 `persistent_dormant`”，相当於每拦一次给模型递一次下台阶，是“容易停下来”的头号原因。
 
 **只检查真正的写目标。** 路径判定不再拿整条命令做子串匹配，而是先提取“这条命令到底往哪写”：重定向目标、`cp/mv/rm/tee/Set-Content/mkdir/...` 的位置参数、`-o/--output/-OutFile` 的值、内联脚本（`writeFileSync` / `open(...,'w')`）里的字符串字面量。git-bash 路径、`~`、`$env:TEMP` 这些展开后统一 `realpath` 比较。因此 `npm install ../local-pkg`、`echo "see ~/docs" > notes.md`、`git commit -m "handle /tmp cleanup"` 不再误拦，而 `echo x > ..\escape.txt`、`cp a.txt ../out/b.txt`、`git -C C:\Temp reset --hard` 依旧拦。
+
+## 压缩守护配置
+
+可选配置文件 `~/.pi/agent/pi-persistent.json`，文件不存在时使用以下默认值，未知键忽略：
+
+```jsonc
+{
+  "compaction": {
+    "mode": "always",         // always 守护所有压缩；persistent 只在有常驻 mission 时；off 回到 pi 默认行为
+    "targetTokens": 3000,     // 摘要正文的目标尺寸
+    "maxInputChars": 24000,   // 增量消息的序列化预算
+    "maxOutputTokens": 16384, // 辅助请求输出上限，按模型自身上限钳制
+    "timeoutMs": 180000,
+    "provider": "",           // 可选固定摘要模型，与 model 成对填写；留空复用会话当前模型
+    "model": ""
+  }
+}
+```
+
+守护的辅助请求使用独立路由 session id、不写 prompt cache、不发送思考档位。
 
 ## 安装
 
@@ -82,11 +103,13 @@ pi -e <本机绝对路径>\index.ts
 - **流程矩阵 7/7**（`node test/probe-qwen-flows.mjs`）。真实自动续派、`/persistent resume` 即刻派发、shell 相对路径加解释器逃逸拦截、manual compaction 后继续、任务中途替换后旧工具调用按 id 拒收、零 extension_error、零投递重发。
 - **崩溃恢复 PASS**（`node test/drive-qwen-restore.mjs`）。active mission 的进程在长命令中途被强杀，重启后无任何用户输入自动续跑，补完 restore-after.txt 并 dormant。
 - **跨项目 fork PASS**（`node test/probe-qwen-fork.mjs`）。active 会话 fork 到另一 cwd 后 mission 强制 `off` 并提示重开。
-- 测试入口。`npm test` 跑 typecheck 加守卫单测；E2E 五个脚本：`drive-rpc.mjs`、`probe-continuity.mjs`、`probe-qwen-flows.mjs`、`drive-qwen-restore.mjs`、`probe-qwen-fork.mjs`，默认 `minimax/MiniMax-M3` + `high`，可用 `PI_E2E_MODEL` / `PI_E2E_THINKING` 替换。
+- **压缩守护 13 离线 + E2E 7/7**（`node test/compaction-sanity.ts`、`npm run test:e2e:compact`）。离线面覆盖模式矩阵、配置钳制、transcript 去思考与尾部截断、两段式压缩（先压旧摘要再合并）、`length`/超限触发压缩重试、模型不可达时本地兜底、取消透传与文件清单截断。E2E 用独立 `PI_CODING_AGENT_DIR` 临时目录（`keepRecentTokens: 50`）加真实 `aliyun-tokenplan/qwen3.8-flash` + `--thinking high`，以 RPC `{"type":"compact"}` 触发，断言守护接管（会话条目 `details.guard="pi-persistent"`）、摘要结构化、压缩后会话继续、零 extension_error。
+- 测试入口。`npm test` 跑 typecheck、守卫单测和压缩守护单测；E2E 六个脚本：`drive-rpc.mjs`、`probe-continuity.mjs`、`probe-qwen-flows.mjs`、`drive-qwen-restore.mjs`、`probe-qwen-fork.mjs`、`manual-compact-e2e.mjs`，默认 `minimax/MiniMax-M3` + `high`，可用 `PI_E2E_MODEL` / `PI_E2E_THINKING` 替换。
 
 ## 权限
 
 - 拦截 `write` / `edit` / `bash` / `powershell` 工具调用，block 并回传理由，只在常驻模式激活期间生效
 - 追加 `persistent-state` custom session 条目持久化状态（不可变快照，含 `persistent_wait` 的到期时间），随会话文件存储，不写其他磁盘位置
 - `ui.notify` 状态通知与 `ui.setStatus` 状态栏文本
-- 不读取 conversation 图片，不访问网络，不使用任何阻塞式 UI 原语
+- 压缩守护接管期间发起辅助模型请求（独立路由 session id，不写 prompt cache，不发送思考档位）
+- 不读取 conversation 图片，不使用任何阻塞式 UI 原语；除辅助摘要请求外不访问网络

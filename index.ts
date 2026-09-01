@@ -9,13 +9,21 @@
  * no-progress breakers; the only limits are the mission scope and the
  * workspace boundary.
  *
- * Non-blocking by construction: the loop never waits on the user. User-facing
- * notifications use ui.notify (a toast, not a dialog); the blocking ui
- * primitives (confirm/select/input) are never called.
+ * Non-blocking by construction: the autonomous loop never waits on the user.
+ * The user-invoked /persistent command may open a menu, but timers and
+ * continuation dispatches never call blocking UI primitives.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+	completePersistentArguments,
+	showPersistentMenu,
+} from "./menu.ts";
 import {
 	blockCommand,
 	blockOutsideWorkspace,
@@ -32,6 +40,12 @@ import {
 	DORMANT_TOOL_DESCRIPTION,
 	WAIT_TOOL_DESCRIPTION,
 } from "./prompts.ts";
+import {
+	guardApplies,
+	guardCompaction,
+	loadCompactionConfig,
+	type CompactionGuardConfig,
+} from "./compaction.ts";
 import {
 	loadState,
 	MISSION_MAX_CHARS,
@@ -62,7 +76,10 @@ interface AwaitingStart {
 }
 
 export default function (pi: ExtensionAPI) {
-	log("loaded (awaiting /persistent <mission>)");
+	const compactConfig: CompactionGuardConfig = loadCompactionConfig();
+	log(
+		`loaded (use /persistent for the menu or /persistent <mission>; compaction guard: ${compactConfig.mode})`,
+	);
 	let state: PersistentState | undefined;
 	/** Rotated on start/sleep/restore; stale timers and dispatches bail out on mismatch. */
 	let generation = 0;
@@ -78,6 +95,8 @@ export default function (pi: ExtensionAPI) {
 	let wakeTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Latest callback context, kept so timers can refresh the status line. */
 	let lastCtx: ExtensionContext | undefined;
+	/** Aborts a user menu when the session or persistent generation changes. */
+	let menuController: AbortController | undefined;
 	let nextRunStateId: string | undefined;
 	let currentRunStateId: string | undefined;
 	let currentRunHadOutcome = false;
@@ -98,6 +117,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function clearTimers() {
+		if (menuController) {
+			menuController.abort();
+			menuController = undefined;
+		}
 		if (wakeTimer) {
 			clearTimeout(wakeTimer);
 			wakeTimer = undefined;
@@ -402,8 +425,21 @@ export default function (pi: ExtensionAPI) {
 		restoreSelectedBranch(ctx, "session tree navigation");
 	});
 
-	pi.on("session_before_compact", (_event) => {
+	// Bounded lossy compaction: pi's default chained summary grows toward
+	// a constant output ceiling and deadlocks long autonomous missions once it
+	// lands there. See compaction.ts for the guard contract.
+	pi.on("session_before_compact", async (event, ctx) => {
 		if (state?.status === "active") clearTimers();
+		if (!guardApplies(compactConfig, state?.status)) return;
+		try {
+			const result = await guardCompaction(event, ctx, compactConfig, missionContext(state), log);
+			if (result) return result;
+		} catch (error) {
+			log(
+				`compaction guard error: ${error instanceof Error ? error.message : String(error)}; falling back to default compaction`,
+			);
+		}
+		return;
 	});
 
 	pi.on("session_compact", (event, ctx) => {
@@ -732,19 +768,158 @@ export default function (pi: ExtensionAPI) {
 
 	// ---------- commands ----------
 
+	function notifyStatus(ctx: ExtensionContext) {
+		try {
+			ctx.ui.notify(
+				`pi-persistent: ${statusLabel(state)}${state ? `\nmission: ${truncate(state.mission, 200)}\nworkspace: ${state.workspaceRoot}` : ""}\nmenu: /persistent (TUI) · start direct: /persistent <mission> · stop: /sleep`,
+				"info",
+			);
+		} catch {
+			/* ignore */
+		}
+	}
+
+	function startMission(missionInput: string, ctx: ExtensionContext) {
+		const mission = missionInput.trim();
+		if (!mission) {
+			notifyStatus(ctx);
+			return;
+		}
+		if (mission.length > MISSION_MAX_CHARS) {
+			try {
+				ctx.ui.notify(
+					`pi-persistent: mission too long (max ${MISSION_MAX_CHARS} characters). Put long instructions in a file and reference it.`,
+					"error",
+				);
+			} catch {
+				/* ignore */
+			}
+			return;
+		}
+		lastCtx = ctx;
+		generation++;
+		clearTimers();
+		nextRunStateId = undefined;
+		consecutiveErrors = 0;
+		lastRunAborted = false;
+		hardStopMessage = undefined;
+		state = {
+			id: newId(),
+			mission,
+			status: "active",
+			workspaceRoot: resolveRealRoot(ctx.cwd),
+			startedAt: Date.now(),
+			updatedAt: Date.now(),
+			iteration: 0,
+		};
+		persist();
+		updateStatus(ctx);
+		try {
+			ctx.ui.notify(
+				`Persistent mode active. Workspace root: ${state.workspaceRoot}. Stop with /sleep.`,
+				"info",
+			);
+		} catch {
+			/* ignore */
+		}
+		log(`started mission ${state.id} in ${state.workspaceRoot}`);
+		let idle = false;
+		try {
+			idle = ctx.isIdle?.() === true;
+		} catch {
+			/* stale ctx → not idle */
+		}
+		beginOwnedDelivery(buildKickoffPrompt(state), state.id, idle ? "followUp" : "steer");
+	}
+
+	function resumeMission(ctx: ExtensionContext) {
+		lastCtx = ctx;
+		if (state?.status === "dormant") {
+			state.status = "active";
+			state.reason = undefined;
+			state.updatedAt = Date.now();
+			persist();
+			updateStatus(ctx);
+			try {
+				ctx.ui.notify("pi-persistent: resumed.", "info");
+			} catch {
+				/* ignore */
+			}
+			dispatchContinuation();
+			return;
+		}
+		try {
+			ctx.ui.notify(`pi-persistent: ${statusLabel(state)}`, "info");
+		} catch {
+			/* ignore */
+		}
+	}
+
+	function wakeMission(ctx: ExtensionContext) {
+		lastCtx = ctx;
+		if (!state || state.status !== "active" || !state.wakeAt || state.wakeAt <= Date.now()) {
+			try {
+				ctx.ui.notify("pi-persistent: no active wait to wake.", "info");
+			} catch {
+				/* ignore */
+			}
+			return;
+		}
+		if (wakeTimer) {
+			clearTimeout(wakeTimer);
+			wakeTimer = undefined;
+		}
+		state.wakeAt = undefined;
+		state.wakeMs = undefined;
+		state.wakeNote = undefined;
+		state.updatedAt = Date.now();
+		persist();
+		updateStatus(ctx);
+		try {
+			ctx.ui.notify("pi-persistent: waking now.", "info");
+		} catch {
+			/* ignore */
+		}
+		deferScheduleDispatch(ctx, 0, "wake");
+	}
+
+	async function openPersistentMenu(ctx: ExtensionCommandContext) {
+		if (ctx.mode !== "tui") {
+			notifyStatus(ctx);
+			return;
+		}
+		menuController?.abort();
+		const controller = new AbortController();
+		const menuGeneration = generation;
+		menuController = controller;
+		try {
+			await showPersistentMenu(
+				ctx,
+				{
+					getState: () => state,
+					startMission: (mission, menuCtx) => startMission(mission, menuCtx),
+					resumeMission: (menuCtx) => resumeMission(menuCtx),
+					sleep: (menuCtx, reason) => doSleep(menuCtx, reason),
+					wakeMission: (menuCtx) => wakeMission(menuCtx),
+				},
+				{
+					signal: controller.signal,
+					isCurrent: () =>
+						generation === menuGeneration && menuController === controller,
+				},
+			);
+		} finally {
+			if (menuController === controller) menuController = undefined;
+		}
+	}
+
 	pi.registerCommand("persistent", {
 		description: "Start / inspect persistent autonomous mode (/persistent <mission>, off, resume)",
+		getArgumentCompletions: (prefix) => completePersistentArguments(prefix),
 		handler: async (args, ctx) => {
 			const input = args.trim();
 			if (!input) {
-				try {
-					ctx.ui.notify(
-						`pi-persistent: ${statusLabel(state)}${state ? `\nmission: ${truncate(state.mission, 200)}\nworkspace: ${state.workspaceRoot}` : ""}\n/start: /persistent <mission> · stop: /sleep`,
-						"info",
-					);
-				} catch {
-					/* ignore */
-				}
+				await openPersistentMenu(ctx);
 				return;
 			}
 			if (input === "off" || input === "stop") {
@@ -752,69 +927,10 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (input === "resume") {
-				if (state?.status === "dormant") {
-					state.status = "active";
-					state.reason = undefined;
-					state.updatedAt = Date.now();
-					persist();
-					updateStatus(ctx);
-					try {
-						ctx.ui.notify("pi-persistent: resumed.", "info");
-					} catch {
-						/* ignore */
-					}
-					dispatchContinuation();
-				} else {
-					try {
-						ctx.ui.notify(`pi-persistent: ${statusLabel(state)}`, "info");
-					} catch {
-						/* ignore */
-					}
-				}
+				resumeMission(ctx);
 				return;
 			}
-			if (input.length > MISSION_MAX_CHARS) {
-				try {
-					ctx.ui.notify(`pi-persistent: mission too long (max ${MISSION_MAX_CHARS} characters). Put long instructions in a file and reference it.`, "error");
-				} catch {
-					/* ignore */
-				}
-				return;
-			}
-			generation++;
-			clearTimers();
-			nextRunStateId = undefined;
-			consecutiveErrors = 0;
-			lastRunAborted = false;
-			hardStopMessage = undefined;
-			state = {
-				id: newId(),
-				mission: input,
-				status: "active",
-				workspaceRoot: resolveRealRoot(ctx.cwd),
-				startedAt: Date.now(),
-				updatedAt: Date.now(),
-				iteration: 0,
-			};
-			persist();
-			updateStatus(ctx);
-			try {
-				ctx.ui.notify(
-					`Persistent mode active. Workspace root: ${state.workspaceRoot}. Stop with /sleep.`,
-					"info",
-				);
-			} catch {
-				/* ignore */
-			}
-			log(`started mission ${state.id} in ${state.workspaceRoot}`);
-			// A dead ctx throws on any property access; degrade to steer so the kickoff is not lost.
-			let idle = false;
-			try {
-				idle = ctx.isIdle?.() === true;
-			} catch {
-				/* stale ctx → not idle */
-			}
-			beginOwnedDelivery(buildKickoffPrompt(state), state.id, idle ? "followUp" : "steer");
+			startMission(input, ctx);
 		},
 	});
 
@@ -824,6 +940,22 @@ export default function (pi: ExtensionAPI) {
 			doSleep(ctx, args.trim() || "user command (/sleep)");
 		},
 	});
+}
+
+/** Mission + checkpoint digest fed to the compaction guard. */
+function missionContext(state: PersistentState | undefined): string | undefined {
+	if (!state || state.status === "off") return undefined;
+	const lines = [`Mission: ${state.mission}`, `Status: ${state.status} · iteration ${state.iteration}`];
+	if (state.checkpoint) {
+		if (state.checkpoint.lastKnownState) {
+			lines.push(`Last known state: ${state.checkpoint.lastKnownState}`);
+		}
+		if (state.checkpoint.nextCheck) lines.push(`Next check: ${state.checkpoint.nextCheck}`);
+		if (state.checkpoint.stoppingCondition) {
+			lines.push(`Stopping condition: ${state.checkpoint.stoppingCondition}`);
+		}
+	}
+	return lines.join("\n");
 }
 
 interface AssistantMessageLike {
