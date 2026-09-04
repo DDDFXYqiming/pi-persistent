@@ -1,12 +1,13 @@
 {
 	"name": "pi-persistent",
-	"version": "0.4.0",
+	"version": "0.4.1",
 	"description": "Resident autonomous mode for the Pi Coding Agent: /persistent <mission> keeps working, waiting and self-finding in-scope follow-ups until /sleep.",
 	"type": "module",
 	"scripts": {
 		"typecheck": "tsc -p tsconfig.json",
-		"test": "npm run typecheck && npm run test:guard && npm run test:menu && npm run test:menu:tui && npm run test:compaction",
+		"test": "npm run typecheck && npm run test:guard && npm run test:menu && npm run test:menu:tui && npm run test:compaction && npm run test:scope",
 		"test:compaction": "node test/compaction-sanity.ts",
+		"test:scope": "node test/tool-scope-sanity.ts",
 		"test:guard": "node test/guard-sanity.ts",
 		"test:menu": "node test/menu-sanity.ts",
 		"test:menu:tui": "node test/menu-tui.ts",

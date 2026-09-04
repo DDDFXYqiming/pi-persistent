@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import {
 	buildMergePrompt,
+	DEFAULT_CONFIG,
 	estimateTextTokens,
 	fallbackSummary,
 	formatFileOps,
@@ -32,13 +33,21 @@ pass("guardApplies mode matrix");
 
 // ---------- config parsing ----------
 const parsed = parseConfig({ compaction: { mode: "bogus", targetTokens: 10, maxOutputTokens: 1e9, timeoutMs: "x" } });
-assert.equal(parsed.mode, "always");
+assert.equal(parsed.mode, "persistent");
 assert.equal(parsed.targetTokens, 800); // clamped up to min
 assert.equal(parsed.maxOutputTokens, 32_768); // clamped down to max
 assert.equal(parsed.timeoutMs, 180_000); // non-number -> default
-assert.equal(parseConfig(null).mode, "always");
+assert.equal(parseConfig(null).mode, "persistent");
 assert.equal(parseConfig({}).targetTokens, 3_000);
 pass("config defaults, clamps, and mode fallback");
+
+// The shipped default must leave ordinary sessions to pi's own compaction.
+assert.equal(DEFAULT_CONFIG.mode, "persistent");
+assert.equal(guardApplies(DEFAULT_CONFIG, undefined), false);
+assert.equal(guardApplies(DEFAULT_CONFIG, "off"), false);
+assert.equal(guardApplies(DEFAULT_CONFIG, "active"), true);
+assert.equal(guardApplies(DEFAULT_CONFIG, "dormant"), true);
+pass("default config is scoped to persistent mode");
 
 // ---------- transcript serialization ----------
 const transcript = serializeTranscript(

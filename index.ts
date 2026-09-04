@@ -58,6 +58,14 @@ import {
 
 const STATE_ENTRY_TYPE = "persistent-state";
 
+/**
+ * Pi activates every tool an extension registers, and each active tool is sent in the
+ * tool list and the system prompt of every request in the session — including sessions
+ * that never touched /persistent. The mission tools are therefore armed only while a
+ * mission exists and scoped out again when it stops.
+ */
+const PERSISTENT_TOOL_NAMES = ["persistent_dormant", "persistent_wait", "persistent_checkpoint"];
+
 /** Provider errors where retrying cannot ever succeed until the user acts. */
 const HARD_STOP_RE =
 	/usage[_\s-]*(?:limit|cap)|quota|insufficient[_\s-]*(?:quota|credits?|balance)|out of credits|payment required|invalid api key|unauthori[sz]ed|credentials/i;
@@ -106,6 +114,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function persist() {
+		syncToolScope();
 		if (!state) return;
 		try {
 			// SessionManager retains custom-entry data by reference in memory. Store an
@@ -113,6 +122,31 @@ export default function (pi: ExtensionAPI) {
 			pi.appendEntry(STATE_ENTRY_TYPE, { state: structuredClone(state) });
 		} catch (error) {
 			log(`appendEntry failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	/**
+	 * Arms the mission tools while a mission exists (active or dormant — dormant wakes on
+	 * the next user message and needs them again) and drops them when it is off, so an
+	 * ordinary session keeps the plain pi tool set. Foreign and built-in tools are kept.
+	 */
+	function syncToolScope() {
+		const wantActive = !!state && state.status !== "off";
+		let current: string[];
+		try {
+			current = pi.getActiveTools();
+		} catch (error) {
+			log(`getActiveTools failed: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+		const others = current.filter((name) => !PERSISTENT_TOOL_NAMES.includes(name));
+		const next = wantActive ? [...others, ...PERSISTENT_TOOL_NAMES] : others;
+		// Same length means the same set: only our own names are ever added or removed.
+		if (next.length === current.length) return;
+		try {
+			pi.setActiveTools(next);
+		} catch (error) {
+			log(`setActiveTools failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
@@ -368,6 +402,7 @@ export default function (pi: ExtensionAPI) {
 		generation++;
 		clearTimers();
 		state = loadState(ctx);
+		syncToolScope();
 		consecutiveErrors = 0;
 		lastRunAborted = false;
 		hardStopMessage = undefined;
@@ -624,7 +659,7 @@ export default function (pi: ExtensionAPI) {
 		name: "persistent_dormant",
 		label: "Persistent dormant",
 		description: DORMANT_TOOL_DESCRIPTION,
-		promptSnippet: "persistent_dormant: stop autonomous continuation (persistent mode)",
+		promptSnippet: "stop autonomous continuation and go dormant (persistent mode)",
 		parameters: Type.Object({
 			persistent_id: Type.String({
 				description: "Exact persistent id shown in the latest persistent prompt",
@@ -668,7 +703,7 @@ export default function (pi: ExtensionAPI) {
 		name: "persistent_wait",
 		label: "Persistent wait",
 		description: WAIT_TOOL_DESCRIPTION,
-		promptSnippet: "persistent_wait: sleep then self-wake, mission stays active (persistent mode)",
+		promptSnippet: "sleep then self-wake, mission stays active (persistent mode)",
 		parameters: Type.Object({
 			persistent_id: Type.String({
 				description: "Exact persistent id shown in the latest persistent prompt",
@@ -715,7 +750,7 @@ export default function (pi: ExtensionAPI) {
 		name: "persistent_checkpoint",
 		label: "Persistent checkpoint",
 		description: CHECKPOINT_TOOL_DESCRIPTION,
-		promptSnippet: "persistent_checkpoint: update the mission checkpoint (persistent mode)",
+		promptSnippet: "update the mission checkpoint (persistent mode)",
 		parameters: Type.Object({
 			persistent_id: Type.String({
 				description: "Exact persistent id shown in the latest persistent prompt",

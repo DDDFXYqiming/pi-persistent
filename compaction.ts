@@ -8,8 +8,8 @@
  * token cap", the context never shrinks, and the session deadlocks at the
  * threshold. Long autonomous missions reach that state reliably.
  *
- * This module takes over `session_before_compact` and replaces that behavior
- * with an explicitly lossy, size-bounded handoff summary:
+ * While an explicit mission exists this module answers `session_before_compact`
+ * with an explicitly lossy, size-bounded handoff summary, replacing that behavior:
  *
  * 1. Condense: an oversized previous summary is rewritten to a fraction of the
  *    target before the merge, so the chained size stops ratcheting.
@@ -24,6 +24,10 @@
  *
  * The summarization call never sends a reasoning option — a pure copy task
  * must not spend the budget on thinking tokens.
+ *
+ * Reach is set by `mode`: `persistent` (default) guards only sessions with a
+ * mission, `always` opts into guarding every session including ones that never
+ * used /persistent, and `off` leaves pi's own compaction alone everywhere.
  */
 
 import { randomUUID } from "node:crypto";
@@ -62,7 +66,9 @@ export interface CompactionGuardConfig {
 export const CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-persistent.json");
 
 export const DEFAULT_CONFIG: CompactionGuardConfig = {
-	mode: "always",
+	// Guarding someone else's session is a reach the plugin should not take by
+	// default; "always" stays available as an explicit opt-in.
+	mode: "persistent",
 	targetTokens: 3_000,
 	maxInputChars: 24_000,
 	maxOutputTokens: 16_384,
