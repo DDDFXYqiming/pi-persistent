@@ -89,27 +89,13 @@ pi -e <本机绝对路径>\index.ts
 
 状态栏显示 `♾ active · auto N`（自主续跑中）、`♾ ⏳ waiting 27s · auto N`（`persistent_wait` 定时睡中，会自动醒）或 `♾ 💤 dormant · 理由`（安静待唤醒）。**事实上只有两个停径**：你执行 `/sleep`，或模型认定真正需要用户输入/越界授权的死胡同（`persistent_dormant`）。没有轮数上限，也没有“无进展”式猜测熔断；mission 完成不是停径，找不出 in-scope 后续才是。provider 瞬时错误只做指数退避（10s→5min），退避完继续跑；quota/auth 硬错先退避重试并 notify，连续 2 次才进 dormant（仍是你发一句话就唤醒）。
 
-## 实测
+## 验证
 
-以下全部在隔离工作区（`.tmp/<probe>/workspace` + 独立 `--session-dir`）跑，以 CLI 方式调起 pi（`pi --mode rpc --offline --no-extensions -e <abs>/index.ts`），模型 `minimax/MiniMax-M3`，思考等级 `high`。
+`npm test` 执行类型检查，以及边界守卫、压缩守护和工具作用域的离线测试。
 
-- **类型与边界单测 53/53**（离线，无模型）。junction 逃逸、大小写不敏感、`..` 穿越、盘符外写入、`$env:TEMP`/`process.env.TEMP` 环境路径、内联解释器写调用（含嵌套引号）、可变更 git 子命令、`rm -rf /` 类命令、URL 假阳性与 `2>&1` fd 复制放行；新增 12 条误拦/目标判定回归（`npm install ../local-pkg`、`pip3 install -e ../pkg`、`echo "see ~/docs" > notes.md`、`git commit -m "handle /tmp …"` 必须放行，`cp a.txt ../out/b.txt`、`touch ../x`、`Set-Content "notes\..\..\escape.txt"` 必须拦）。
-- **E2E RPC 18/18**（`node test/drive-rpc.mjs`，五条路径）
-  - 任务全程跑通：write → read 回读 → 字节级校验 → checkpoint → dormant → 循环安静。
-  - **拦截不再等于停机**。对 `C:\…\Temp\pi-persistent-escape.txt` 的越界写被 block 且理由回传，模型没绕过、没因拦截休眠，而是改在工作区内写了 `blocked-note.txt` 于扰（`p2-kept-working-after-block`），做完才 dormant；逃逸文件从未存在。
-  - **`persistent_wait` 自我唤醒**：`p5-wait-tool-used` → `p5-status-stays-active-while-waiting`（status 仍 `active` 且 `wakeAt` 已写盘）→ `p5-self-wake-without-user-input`（距 wait 调用 **gap=20s**，不是 settled 边界立即续跑），全程零用户输入。
-  - dormant 后被用户新指令唤醒并优先执行（STEERING），完成后再次 dormant；`/sleep` 即停，残留工具调用变 no-op。
-- **永续探针 8/8**（`node test/probe-continuity.mjs`，本次新增）
-  - `c1-loop-keeps-running-without-user-input`：mission 明确禁止 dormant/wait，模型每轮只回“完成了”，宿主仍连续自动续派（settled 0 → 4）且 `status=active iteration=4`——“做完”不会停下来。
-  - `c2-wake-survives-foreign-run`：30s 等待窗口第 30s 插入一条**无 mission 标记的外来扩展消息**（另装一个 `noise.ts` 扩展），该 run 没弄脏 mission 归属，到点仍自我唤醒（starts 5 → 6，期间零用户 prompt）。
-  - `/sleep` 后在途 run 能收尾，但不再起新 run（agent_start delta=0）。
-- **流程矩阵 7/7**（`node test/probe-qwen-flows.mjs`）。真实自动续派、`/persistent resume` 即刻派发、shell 相对路径加解释器逃逸拦截、manual compaction 后继续、任务中途替换后旧工具调用按 id 拒收、零 extension_error、零投递重发。
-- **崩溃恢复 PASS**（`node test/drive-qwen-restore.mjs`）。active mission 的进程在长命令中途被强杀，重启后无任何用户输入自动续跑，补完 restore-after.txt 并 dormant。
-- **跨项目 fork PASS**（`node test/probe-qwen-fork.mjs`）。active 会话 fork 到另一 cwd 后 mission 强制 `off` 并提示重开。
-- **压缩守护 13 离线 + E2E 7/7**（`node test/compaction-sanity.ts`、`npm run test:e2e:compact`）。离线面覆盖模式矩阵、配置钳制、transcript 去思考与尾部截断、两段式压缩（先压旧摘要再合并）、`length`/超限触发压缩重试、模型不可达时本地兜底、取消透传与文件清单截断。E2E 用独立 `PI_CODING_AGENT_DIR` 临时目录（`keepRecentTokens: 50`）加真实 `aliyun-tokenplan/qwen3.8-flash` + `--thinking high`，以 RPC `{"type":"compact"}` 触发，断言守护接管（会话条目 `details.guard="pi-persistent"`）、摘要结构化、压缩后会话继续、零 extension_error。
-- **提示词足迹 A/B（v0.4.1）**。用本地 HTTP 转发代理抓取 pi 发往 `qwen-local/qwen3.8-27b` 的原始请求体（`--mode rpc` 与 `-p` 两条路径，独立 `PI_CODING_AGENT_DIR`）做对照。修复前：仅加载插件、从未执行 `/persistent` 的新会话，系统提示词多出 3 行 `Available tools`（+56 token），工具列表 4→7（+667 token，单次请求 +723 token），`/sleep` 之后与 `new_session` 之后都不回落，模型被问“你现在能调用哪些工具”时会把三个 persistent 工具报成常规能力。修复后：同一抓包与不装插件的基线逐字节一致（系统提示词同 sha、4 个工具、0 行 snippet），模型只报 `read, bash, edit, write`；kickoff 请求仍带回 7 个工具与 3 行 snippet，mission 全程可用（实测创建文件并 `persistent_dormant` 收尾），`/sleep` 与 `new_session` 后回到基线。离线侧新增 `test/tool-scope-sanity.ts` 15 项，用一个镜像 pi 激活语义的假 `ExtensionAPI` 驱动真实扩展工厂：注册即激活、`session_start` 摘除、`/persistent` 装回、`/sleep` 摘除、恢复 `active`/`dormant` mission 时装回、恢复 `off` 或跨工作区 mission 时保持摘除、切换分支时回落，且两个方向都不碰内建工具与其他扩展的工具。修复前该测试 6 项红，修复后 15/15 绿。
-- **触达面 A/B（v0.4.1 续）**。同一条压缩路径两态对照（RPC {type:"compact"}，`keepRecentTokens: 50`，模型 `qwen-local/qwen3.8-27b`）：没有 mission 的会话里守护不再介入，stderr 无 `guard:` 行，会话条目的 `details` 回到 pi 自己的形状（`readFiles`/`modifiedFiles`，2150 → 估 1142 token，pi 默认模板含 split-turn 段）；mission 在跑的会话里 `[pi-persistent] guard: llm compaction of 5618 tokens -> ~732 summary tokens`、条目 `details.guard=pi-persistent path=llm`，守护自己的辅助请求不带任何工具，压缩后的自动续派请求仍带满 7 个工具、循环照旧。另核对：无 mission 的会话 jsonl 里 `persistent-state` custom 条目 0 条（插件不往不属于它的会话写东西），有 mission 的 17 条；`~/.pi/agent` 全域 9080 个文件里没有别的扩展占用 `/sleep`、`/compact`、`/persistent` 命令名。`test/tool-scope-sanity.ts` 扩到 18 项，新增「无 mission 时不应答 `session_before_compact`、越界 `write` 不筛查；有 mission 时筛查生效」。
-- 测试入口。`npm test` 跑 typecheck、守卫单测、压缩守护单测和作用域单测；E2E 六个脚本：`drive-rpc.mjs`、`probe-continuity.mjs`、`probe-qwen-flows.mjs`、`drive-qwen-restore.mjs`、`probe-qwen-fork.mjs`、`manual-compact-e2e.mjs`，默认 `minimax/MiniMax-M3` + `high`，可用 `PI_E2E_MODEL` / `PI_E2E_THINKING` 替换。
+端到端脚本保存在 `test/`，覆盖 RPC 续派、等待唤醒、崩溃恢复、跨项目 fork 和手动压缩。运行时使用隔离的会话目录，并通过 `PI_E2E_MODEL` 与 `PI_E2E_THINKING` 选择可用模型和思考等级。
+
+边界测试应确认越界写入被拒绝，后续操作仍受同一约束。作用域测试比较有无 mission 的两种状态，确保未激活时不增加工具或改写默认压缩流程，停止后恢复原有状态。
 
 ## 权限
 
