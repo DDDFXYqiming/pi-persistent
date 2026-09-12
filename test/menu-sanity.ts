@@ -23,7 +23,7 @@ function state(status: PersistentState["status"], overrides: Partial<PersistentS
 		id: "mission-1",
 		mission: "Finish the current feature and verify it",
 		status,
-		workspaceRoot: "D:\\AI_Projects\\demo",
+		workspaceRoot: "D:\\test-workspaces\\demo",
 		startedAt: 1,
 		updatedAt: 1,
 		iteration: 3,

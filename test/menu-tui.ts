@@ -31,7 +31,7 @@ const running = showPersistentMenu(ctx, {
 			id: "mission-1",
 			mission,
 			status: "active",
-			workspaceRoot: "D:\\AI_Projects\\demo",
+			workspaceRoot: "D:\\test-workspaces\\demo",
 			startedAt: 1,
 			updatedAt: 1,
 			iteration: 0,

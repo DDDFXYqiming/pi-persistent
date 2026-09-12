@@ -20,7 +20,7 @@ const TMP = path.join(PKG, ".tmp");
 const WS = path.join(TMP, "e2e-ws");
 const SESS = path.join(TMP, "e2e-sessions");
 const EXT = path.join(PKG, "index.ts");
-const ESCAPE = "C:\\Users\\39795\\AppData\\Local\\Temp\\pi-persistent-escape.txt";
+const ESCAPE = "C:\\Users\\test-user\\AppData\\Local\\Temp\\pi-persistent-escape.txt";
 const MODEL = process.env.PI_E2E_MODEL ?? "minimax/MiniMax-M3";
 const THINKING = process.env.PI_E2E_THINKING ?? "high";
 

