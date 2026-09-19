@@ -59,10 +59,10 @@ pi install git:github.com/DDDFXYqiming/pi-persistent
 
 # 本地路径备用安装
 git clone https://github.com/DDDFXYqiming/pi-persistent.git
-pi install <本机绝对路径>
+pi install <绝对路径>
 
 # 不安装直接试用
-pi -e <本机绝对路径>\index.ts
+pi -e <绝对路径>\index.ts
 ```
 
 插件没有构建步骤。Pi 通过 jiti 直接运行 TypeScript 源码，`typebox` 由 Pi 内置的扩展模块解析。
