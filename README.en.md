@@ -2,92 +2,110 @@
 
 # pi-persistent
 
-`pi-persistent` adds an opt-in persistent mission mode to the Pi Coding Agent. Start a mission with `/persistent <mission>` and Pi can continue across settled run boundaries, record checkpoints, and schedule another check. The mode ends when you run `/sleep` or when progress needs user input or authorization that the agent cannot obtain.
+**Autonomous resident execution and long-running mission guard for the Pi Coding Agent.**
 
-Continuation and persistence follow the patterns used by [@narumitw/pi-goal](https://github.com/narumiruna/pi-extensions) (MIT). The behavior also follows the documented shape of OpenAI Codex persistent mode. The plugin requires Pi `0.80.6+`, which provides the `agent_settled` event.
+Under default conditions, coding agents complete a single user instruction and stop to await input. `pi-persistent` introduces an autonomous mission loop triggered via `/persistent <mission>`. It empowers the agent to traverse standard turn-settling boundaries (`agent_settled`) unattended—running verifications, resolving leftover defects, executing scheduled checks, and pushing multi-phase engineering tasks until completion or explicit `/sleep`.
 
-## What it does
+---
 
-- **Single-flight continuation.** A new prompt is sent only after `agent_settled`, an idle host, and an empty message queue. Provider retries, compaction, and queued follow-ups are allowed to finish before dispatch. A delivery watchdog retries failed dispatches with exponential backoff.
-- **Mission follow-ups.** After the requested work is complete, the agent can recheck earlier changes, close related open loops, and document the result while staying inside the mission scope.
-- **Timed waiting.** `persistent_wait(wait_seconds, check_next)` keeps the mission active and schedules a wake prompt. The status bar shows the pending wait and its remaining time.
-- **Durable rules and checkpoints.** Each plugin-owned prompt carries the current rules. `persistent_checkpoint` stores the target, known state, next check, and stopping condition in immutable session custom entries, so reload, resume, and fork operations can restore it.
-- **Mission-scoped tools.** `persistent_checkpoint`, `persistent_wait`, and `persistent_dormant` are active only while a mission is active. Calls include the current `persistent_id`, which rejects stale calls after a mission replacement.
-- **User steering.** The newest user message is handled before the mission resumes. Toast notifications use `ui.notify`; the loop does not call blocking `confirm`, `select`, or `input` primitives.
-- **Lifecycle recovery.** Manual compaction, `/persistent resume`, process restart, and session-tree navigation restore or reschedule the active mission. A fork into another workspace disables the mission until a new one is started.
-- **Compaction guard.** In `persistent` mode, long missions use a bounded handoff for `session_before_compact`. The guard can condense an oversized summary, merge new turns, retry an overlong response, and fall back to deterministic local truncation. Full history remains in the session file.
+## Key Features
 
-When a workspace boundary rejects a tool call, the rejection applies to that call. The mission remains active and the returned reason asks the agent to move that operation inside the workspace. Provider errors back off before the mission is parked dormant; a later user message can wake it.
+* **Autonomous Re-dispatch Loop**: Listens directly to `agent_settled` events. When the agent host is idle and queues are empty, it automatically dispatches the next in-scope prompt with exponential backoff and watchdog recovery.
+* **Workspace Sandbox Guard**:
+  * **Deterministic File Confinement**: Resolves physical filesystem paths, rejecting path traversal (`..`), symlinks, and junction breakouts. Confines all write and edit operations strictly within the workspace root.
+  * **Heuristic Shell Guard**: Scans shell command patterns for out-of-scope mutations and destructive operations.
+  * **Unrestricted Read Access**: Grep, file reads, and directory discovery remain fully available.
+* **Immutable Checkpointing & Self-Healing**: Leverages `persistent_checkpoint` to record active milestones, obstacles, and next verification steps into immutable Pi session custom entries. Survives process restarts, compaction, and session tree branches.
+* **Scheduled Suspensions (`persistent_wait`)**: Allows the agent to sleep for designated periods (e.g., waiting for builds or test runners) while updating the TUI status bar with live countdowns before auto-waking.
+* **Compaction Guard**: Intervenes during context compaction on lengthy runs, summarizing progress without discarding mission-critical state.
+* **Human-in-the-Loop Priority**: User keystrokes and manual commands immediately take precedence. Non-blocking UI notifications prevent the autonomous loop from hijacking the terminal.
 
-## Workspace boundary
+---
 
-The boundary is enforced while a mission is active.
+## State Lifecycle
 
-| Layer | Scope | Mechanism |
-|---|---|---|
-| Deterministic | `write` / `edit` | Resolve the target through its deepest existing ancestor, reject `..` traversal and symlink or junction escapes, and require the result to stay under the workspace root. Windows comparisons are case-insensitive. |
-| Best effort | `bash` / `powershell` | Scan destructive commands, write-shaped tokens, inline interpreter writes, mutating git commands, and targets outside the workspace. URLs are removed before target extraction so ordinary URL text does not trigger a block. |
-| Allowed | `read` / `grep` / `find` / `ls` | Read-only access remains available. |
+```
+                ┌──────────────────┐
+                │   /persistent    │ (Launch Mission)
+                └────────┬─────────┘
+                         ▼
+                ┌──────────────────┐
+        ┌──────>│  ACTIVE Running  │<──────┐
+        │       └────────┬─────────┘       │
+(Autonomous              │                 │ (Wakeup)
+ Re-dispatch)   ┌────────┴─────────┐       │
+        │       │  agent_settled   │       │
+        └───────┤  (Turn finished) │       │
+                └────────┬─────────┘       │
+                         ▼                 │
+              [call persistent_wait] ──────┘
+                         │
+                         ▼ (Mission complete / user /sleep)
+                ┌──────────────────┐
+                │ DORMANT Sleeping │
+                └──────────────────┘
+```
 
-The shell scan is a safety net rather than a sandbox. Use a container or WSL when a mission needs hard isolation.
+---
 
-## Compaction guard configuration
+## Installation & Setup
 
-The optional `~/.pi/agent/pi-persistent.json` file uses these defaults when it is absent. Unknown keys are ignored.
+### Install via Pi
+
+```bash
+pi install git:github.com/DDDFXYqiming/pi-persistent
+```
+
+### Local Development
+
+```powershell
+git clone https://github.com/DDDFXYqiming/pi-persistent.git
+cd pi-persistent
+pi -e .\index.ts
+```
+
+*Built with TypeScript and loaded directly by Pi's runtime via Jiti—zero build step required.*
+
+---
+
+## Commands & Tools
+
+```text
+/persistent <mission>      # Start an autonomous mission with explicit objectives
+/persistent                # Inspect current mission status, workspace, and turn counts
+/persistent resume         # Resume a dormant mission
+/persistent off            # Stop the active mission immediately
+/sleep [reason]            # Allow the agent to sleep or stop manually with an optional note
+```
+
+### Mission Tools (Injected Only When Active)
+
+* `persistent_checkpoint`: Saves verified milestones, blockers, and next test criteria.
+* `persistent_wait`: Suspends the loop for a specified number of seconds before waking.
+* `persistent_dormant`: Transitions the agent into sleep when goals are achieved or blocked on missing human credentials.
+
+---
+
+## Compaction Guard Configuration
+
+Customize long-context preservation in `~/.pi/agent/pi-persistent.json`:
 
 ```jsonc
 {
   "compaction": {
-    "mode": "persistent",     // persistent, always, or off
-    "targetTokens": 3000,
-    "maxInputChars": 24000,
-    "maxOutputTokens": 16384,
-    "timeoutMs": 180000,
-    "provider": "",
-    "model": ""
+    "mode": "persistent",     // "persistent" (guard active runs), "always", or "off"
+    "targetTokens": 3000,     // Compaction target token threshold
+    "maxInputChars": 24000,   // Context window character budget
+    "maxOutputTokens": 16384, // Summary generation ceiling
+    "timeoutMs": 180000,      // Auxiliary request timeout
+    "provider": "",           // Dedicated compaction model provider
+    "model": ""               // Dedicated compaction model name
   }
 }
 ```
 
-`persistent` guards sessions with a mission. `always` applies the guard to ordinary sessions as well, and `off` restores Pi's default compaction. Guard requests use fresh routing session IDs, do not write the prompt cache, and do not send a thinking level.
+---
 
-## Install
+## License
 
-```bash
-# from GitHub
-pi install git:github.com/DDDFXYqiming/pi-persistent
-
-# local fallback
-git clone https://github.com/DDDFXYqiming/pi-persistent.git
-pi install <absolute-path>
-
-# try without installing
-pi -e <absolute-path>\index.ts
-```
-
-There is no build step. Pi runs the TypeScript source through jiti and resolves `typebox` through its bundled extension modules.
-
-## Usage
-
-```text
-/persistent <mission>      # start a mission, up to 4000 characters
-/persistent                # show mission, workspace, and auto count
-/persistent resume         # wake a dormant mission
-/persistent off            # stop the mission
-/sleep [reason]            # stop the mission with an optional reason
-```
-
-Without a mission, the plugin leaves the ordinary tool list, prompts, boundary checks, and compaction path unchanged. `/persistent` activates the three mission tools; `/sleep` removes them again.
-
-## Verification
-
-`npm test` runs type checks and offline tests for the workspace boundary, compaction guard, and tool scope. The scripts in `test/` cover RPC continuation, timed wake-up, crash recovery, cross-project forks, and manual compaction. Set `PI_E2E_MODEL` and `PI_E2E_THINKING` when running the end-to-end scripts.
-
-## Permissions
-
-- Intercepts `write`, `edit`, `bash`, and `powershell` calls only while a mission is active.
-- Stores immutable `persistent-state` snapshots in the Pi session file.
-- Uses `ui.notify` and `ui.setStatus` for status updates.
-- Sends auxiliary model requests only for the compaction guard, using fresh routing session IDs without prompt-cache writes or a reasoning option.
-- Adds or removes only its own three tools. It does not modify built-in tools, skills, prompt templates, themes, context files, keyboard shortcuts, or CLI flags.
-- Does not read conversation images. Outside the compaction guard, it does not access the network.
+This project is open-sourced under the [MIT License](LICENSE).
