@@ -24,26 +24,16 @@ Under default conditions, coding agents complete a single user instruction and s
 
 ## State Lifecycle
 
-```
-                ┌──────────────────┐
-                │   /persistent    │ (Launch Mission)
-                └────────┬─────────┘
-                         ▼
-                ┌──────────────────┐
-        ┌──────>│  ACTIVE Running  │<──────┐
-        │       └────────┬─────────┘       │
-(Autonomous              │                 │ (Wakeup)
- Re-dispatch)   ┌────────┴─────────┐       │
-        │       │  agent_settled   │       │
-        └───────┤  (Turn finished) │       │
-                └────────┬─────────┘       │
-                         ▼                 │
-              [call persistent_wait] ──────┘
-                         │
-                         ▼ (Mission complete / user /sleep)
-                ┌──────────────────┐
-                │ DORMANT Sleeping │
-                └──────────────────┘
+```mermaid
+flowchart TD
+    Start["/persistent (Launch Mission)"] --> Active["ACTIVE Running<br/>(Planning, Coding, & Verification)"]
+    Active --> Checkpoint["persistent_checkpoint Snapshot Persisted"]
+    Checkpoint --> Settled["agent_settled (Turn Finished)"]
+    Settled -->|Autonomous Re-dispatch| Active
+    Settled -->|Call persistent_wait| Waiting["Waiting (Scheduled Countdown Wakeup)"]
+    Waiting -->|Timer Expired| Active
+    Settled -->|Goal Reached / User /sleep| Dormant["DORMANT Sleeping (Preserves State)"]
+    Dormant -->|Human Command Interruption| Active
 ```
 
 ---

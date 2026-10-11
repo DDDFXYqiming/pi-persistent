@@ -24,25 +24,16 @@
 
 ## 运行模式与状态流转
 
-```
-                ┌──────────────────┐
-                │   /persistent    │ (启动任务)
-                └────────┬─────────┘
-                         ▼
-                ┌──────────────────┐
-        ┌──────>│    ACTIVE 执行   │<──────┐
-        │       └────────┬─────────┘       │
-(自主续派)               │                 │ (唤醒)
-        │       ┌────────┴─────────┐       │
-        └───────┤  agent_settled   │       │
-                └────────┬─────────┘       │
-                         ▼                 │
-              [调用 persistent_wait] ───────┘
-                         │
-                         ▼ (用户 /sleep 或遇致命阻碍)
-                ┌──────────────────┐
-                │   DORMANT 休眠   │
-                └──────────────────┘
+```mermaid
+flowchart TD
+    Start["/persistent 启动长程任务"] --> Active["ACTIVE 执行态<br/>(自主规划、编码与验证)"]
+    Active --> Checkpoint["persistent_checkpoint 状态快照落盘"]
+    Checkpoint --> Settled["agent_settled 轮次结算"]
+    Settled -->|自主续派执行| Active
+    Settled -->|调用 persistent_wait| Waiting["挂起等待 (精确倒计时唤醒)"]
+    Waiting -->|计时到达| Active
+    Settled -->|阶段目标达成 / 手动 /sleep| Dormant["DORMANT 休眠态 (保留完整状态)"]
+    Dormant -->|人类新指令插队| Active
 ```
 
 ---
